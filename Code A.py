@@ -322,38 +322,190 @@ print(f"    + Lệch Desc : Ksys ({len(df_desc_diff_ksys)}) | New ({len(df_desc_
 # Mục tiêu: trong hệ mã New, tìm những mã item KHÁC NHAU nhưng mô tả (sau chuẩn hóa)
 # lại khớp nhau theo đúng thuật toán smart_specs_matching ở trên -> nghi bị tạo trùng item.
 
-# 4.1. Hàm gộp các giá trị duy nhất
+# =============================================================
+# 4.1. HÀM HỖ TRỢ
+# =============================================================
+
 def join_unique_values(series):
+    """Gộp các giá trị duy nhất và bỏ giá trị rỗng."""
     values = {
         str(value).strip()
         for value in series
         if pd.notna(value) and str(value).strip()
     }
+
     return ' | '.join(sorted(values))
 
 
-# 4.2. Chuẩn bị dữ liệu
+def normalize_description_part4(description):
+    """Chuẩn hóa Description New riêng cho Phần 4."""
+    if description is None or pd.isna(description):
+        return ''
+
+    s = remove_diacritics(str(description).lower())
+
+    # Giữ cùng quy tắc chuẩn hóa với code hiện tại
+    s = re.sub(r'\bflame[\s-]+retardant\b', 'fr', s)
+    s = re.sub(r'\bh[\s-]*pvc\b', 'hpvc', s)
+    s = re.sub(r'\bcosmolink\s+vina\b', 'cosmolink', s)
+
+    # Bỏ CLASS 5
+    s = re.sub(
+        r'\bclass\s*[-:=]?\s*5(?:\.0)?\b',
+        ' ',
+        s
+    )
+
+    s = normalize_numbers(s)
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    return s
+
+
+def make_description_key(description):
+    """
+    Khóa toàn bộ nội dung Description New.
+
+    Không phụ thuộc thứ tự và không tính token lặp lại.
+    Thiếu hoặc khác một token sẽ tạo khóa khác.
+    """
+    tokens = tokenize_and_clean(
+        description,
+        remove_class5=True
+    )
+
+    if not tokens:
+        return ''
+
+    return '|'.join(sorted(set(tokens)))
+
+
+def make_technical_key(description):
+    """
+    Khóa thông số kỹ thuật có giữ quan hệ chữ và số.
+
+    Ví dụ:
+    - M12 khác M10.
+    - L110 khác L30.
+    - M12,L30 khác M30,L12.
+    - 100VA khác 200VA.
+    """
+    s = normalize_description_part4(description)
+
+    if not s:
+        return ''
+
+    raw_tokens = re.findall(
+        r'[a-z0-9]+(?:\.[a-z0-9]+)*',
+        s
+    )
+
+    technical_tokens = {
+        token.strip('.')
+        for token in raw_tokens
+        if re.search(r'\d', token)
+    }
+
+    return '|'.join(sorted(technical_tokens))
+
+
+def make_category_key(description):
+    """Lấy tên/loại vật tư ở phần đầu trước dấu phẩy."""
+    if description is None or pd.isna(description):
+        return ''
+
+    first_part = str(description).split(',', 1)[0]
+
+    tokens = tokenize_and_clean(
+        first_part,
+        remove_class5=True
+    )
+
+    return '|'.join(tokens)
+
+
+def make_color_key(description):
+    """Lấy toàn bộ màu sắc, kể cả màu nằm một phía."""
+    strict_color_set = set(COLOR_SET) | {
+        'violet',
+        'pink',
+        'greenyellow'
+    }
+
+    tokens = tokenize_no_parenthetical(
+        description,
+        remove_class5=True
+    )
+
+    colors = {
+        token
+        for token in tokens
+        if token in strict_color_set
+    }
+
+    return '|'.join(sorted(colors))
+
+
+def make_origin_key(description):
+    """Lấy toàn bộ thông tin xuất xứ."""
+    tokens = tokenize_no_parenthetical(
+        description,
+        remove_class5=True
+    )
+
+    origins = {
+        token
+        for token in tokens
+        if token in ORIGIN_SET
+    }
+
+    return '|'.join(sorted(origins))
+
+
+# =============================================================
+# 4.2. CHUẨN BỊ DỮ LIỆU
+# =============================================================
+
 df_new_check = df[
-    ['item new', 'Description new', 'item code A', 'item ksys']
+    [
+        'item new',
+        'Description new',
+        'item code A',
+        'Description code A',
+        'item ksys'
+    ]
 ].copy()
 
-# Làm sạch Item New
-df_new_check['item new'] = (
-    df_new_check['item new']
-    .fillna('')
-    .astype(str)
-    .str.strip()
-)
+# Làm sạch các cột mã
+for col in ['item new', 'item code A', 'item ksys']:
+    df_new_check[col] = (
+        df_new_check[col]
+        .fillna('')
+        .astype(str)
+        .str.strip()
+    )
 
 # Loại Item New và Description New rỗng
 df_new_check = df_new_check[
     df_new_check['item new'].ne('')
     & df_new_check['Description new'].notna()
-    & df_new_check['Description new'].astype(str).str.strip().ne('')
+    & df_new_check[
+        'Description new'
+    ].astype(str).str.strip().ne('')
 ].copy()
 
+# Loại các dòng trùng hoàn toàn
+df_new_check = (
+    df_new_check
+    .drop_duplicates(keep='first')
+    .reset_index(drop=True)
+)
 
-# 4.3. Gộp các Item Code A liên quan đến từng Item New + Description New
+
+# =============================================================
+# 4.3. TỔNG HỢP THEO ITEM NEW VÀ DESCRIPTION NEW
+# =============================================================
+
 df_new_unique = (
     df_new_check
     .groupby(
@@ -362,254 +514,399 @@ df_new_unique = (
     )
     .agg({
         'item code A': join_unique_values,
+        'Description code A': join_unique_values,
         'item ksys': join_unique_values
     })
 )
 
-
-# 4.4. Tạo nhóm phân loại để giảm số cặp cần so sánh
-def get_category(desc):
-    """
-    Lấy phần đầu mô tả trước dấu phẩy và chuẩn hóa thành category.
-    """
-    if desc is None or pd.isna(desc):
-        return ''
-
-    first_part = str(desc).split(',', 1)[0]
-
-    tokens = tokenize_and_clean(
-        first_part,
-        remove_class5=True
-    )
-
-    return ' '.join(tokens)
-
-
-df_new_unique['category'] = (
+df_new_unique['Description key'] = (
     df_new_unique['Description new']
-    .apply(get_category)
+    .apply(make_description_key)
 )
 
+df_new_unique['Technical key'] = (
+    df_new_unique['Description new']
+    .apply(make_technical_key)
+)
 
-# 4.5. Union-Find để tạo nhóm Item New trùng
-parent = {
-    item: item
-    for item in df_new_unique['item new'].unique()
-}
+df_new_unique['Category key'] = (
+    df_new_unique['Description new']
+    .apply(make_category_key)
+)
+
+df_new_unique['Color key'] = (
+    df_new_unique['Description new']
+    .apply(make_color_key)
+)
+
+df_new_unique['Origin key'] = (
+    df_new_unique['Description new']
+    .apply(make_origin_key)
+)
+
+# Khóa tổng hợp nghiêm ngặt
+df_new_unique['Duplicate key'] = (
+    df_new_unique['Category key']
+    + '||'
+    + df_new_unique['Description key']
+    + '||'
+    + df_new_unique['Technical key']
+    + '||'
+    + df_new_unique['Color key']
+    + '||'
+    + df_new_unique['Origin key']
+)
+
+df_new_unique = df_new_unique[
+    df_new_unique['Description key'].ne('')
+].copy()
 
 
-def find(item):
-    while parent[item] != item:
-        parent[item] = parent[parent[item]]
-        item = parent[item]
+# =============================================================
+# 4.4. TÌM NHIỀU ITEM NEW CÓ CÙNG DESCRIPTION NEW
+# =============================================================
 
-    return item
+item_count_by_key = (
+    df_new_unique
+    .groupby('Duplicate key')['item new']
+    .nunique()
+)
 
+duplicate_keys = item_count_by_key[
+    item_count_by_key > 1
+].index.tolist()
 
-def union(item_a, item_b):
-    root_a = find(item_a)
-    root_b = find(item_b)
-
-    if root_a != root_b:
-        parent[root_b] = root_a
-
-
-# Khớp tuyệt đối và khớp chứa nhau được xem là tin cậy cao
-STRICT_MATCH_STATUSES = {
+STRICT_DUPLICATE_STATUSES = {
     'Khớp tuyệt đối',
     'Khớp chứa nhau'
 }
 
 pair_records = []
+confirmed_keys = set()
 
 
-# 4.6. So sánh Description New bằng smart_specs_matching
-for category, group in df_new_unique.groupby('category'):
+# =============================================================
+# 4.5. XÁC NHẬN BẰNG SMART_SPECS_MATCHING
+# =============================================================
 
-    rows = group[
-        [
-            'item new',
-            'Description new',
-            'item code A',
-            'item ksys'
-        ]
-    ].to_dict('records')
+for duplicate_key in duplicate_keys:
 
-    number_of_rows = len(rows)
+    group = df_new_unique[
+        df_new_unique['Duplicate key'] == duplicate_key
+    ]
 
-    for i in range(number_of_rows):
-        row_i = rows[i]
+    rows = group.to_dict('records')
 
-        for j in range(i + 1, number_of_rows):
-            row_j = rows[j]
+    for i in range(len(rows)):
+        row_1 = rows[i]
 
-            item_i = row_i['item new']
-            item_j = row_j['item new']
+        for j in range(i + 1, len(rows)):
+            row_2 = rows[j]
 
-            # Không so sánh cùng một Item New
-            if item_i == item_j:
+            if row_1['item new'] == row_2['item new']:
                 continue
 
-            desc_i = row_i['Description new']
-            desc_j = row_j['Description new']
+            desc_1 = row_1['Description new']
+            desc_2 = row_2['Description new']
 
-            # Tận dụng cùng thuật toán kiểm tra lệch Description.
-            # Bỏ CLASS 5 ở cả hai Description New.
             status, detail = smart_specs_matching(
-                desc_i,
-                desc_j,
+                desc_1,
+                desc_2,
                 ignore_class5=True
             )
 
-            if status in MATCH_STATUSES:
-                pair_records.append({
-                    'item new 1': item_i,
-                    'Description new 1': desc_i,
-                    'item code A 1': row_i['item code A'],
-                    'item ksys 1': row_i['item ksys'],
+            # Kiểm tra nghiêm ngặt lần cuối
+            same_description = (
+                row_1['Description key']
+                == row_2['Description key']
+            )
 
-                    'item new 2': item_j,
-                    'Description new 2': desc_j,
-                    'item code A 2': row_j['item code A'],
-                    'item ksys 2': row_j['item ksys'],
+            same_technical_specs = (
+                row_1['Technical key']
+                == row_2['Technical key']
+            )
 
-                    'Trạng thái': status,
-                    'Chi tiết': detail
-                })
+            same_category = (
+                row_1['Category key']
+                == row_2['Category key']
+            )
 
-                # Chỉ gộp nhóm với kết quả tin cậy cao
-                if status in STRICT_MATCH_STATUSES:
-                    union(item_i, item_j)
+            same_color = (
+                row_1['Color key']
+                == row_2['Color key']
+            )
+
+            same_origin = (
+                row_1['Origin key']
+                == row_2['Origin key']
+            )
+
+            is_duplicate = (
+                same_description
+                and same_technical_specs
+                and same_category
+                and same_color
+                and same_origin
+                and status in STRICT_DUPLICATE_STATUSES
+            )
+
+            if not is_duplicate:
+                continue
+
+            confirmed_keys.add(duplicate_key)
+
+            pair_records.append({
+                'Duplicate key': duplicate_key,
+
+                'item new 1': row_1['item new'],
+                'Description new 1': desc_1,
+                'item code A 1': row_1['item code A'],
+                'Description code A 1':
+                    row_1['Description code A'],
+                'item ksys 1': row_1['item ksys'],
+
+                'item new 2': row_2['item new'],
+                'Description new 2': desc_2,
+                'item code A 2': row_2['item code A'],
+                'Description code A 2':
+                    row_2['Description code A'],
+                'item ksys 2': row_2['item ksys'],
+
+                'Thông số kỹ thuật':
+                    row_1['Technical key'],
+                'Màu sắc':
+                    row_1['Color key'],
+                'Xuất xứ':
+                    row_1['Origin key'],
+
+                'Trạng thái': status,
+                'Chi tiết': detail
+            })
 
 
-# 4.7. Tạo bảng chi tiết các cặp nghi trùng
-pair_columns = [
-    'item new 1',
-    'Description new 1',
-    'item code A 1',
-    'item ksys 1',
-    'item new 2',
-    'Description new 2',
-    'item code A 2',
-    'item ksys 2',
-    'Trạng thái',
-    'Chi tiết'
-]
+# =============================================================
+# 4.6. TẠO BẢNG NHÓM ITEM NEW TRÙNG DESCRIPTION
+# =============================================================
 
-df_pair_detail = pd.DataFrame(
-    pair_records,
-    columns=pair_columns
-)
-
-# Loại cặp bị ghi trùng
-df_pair_detail = df_pair_detail.drop_duplicates()
-
-
-# Phân chia kết quả tin cậy cao và cần rà thêm
-df_pair_detail_strict = df_pair_detail[
-    df_pair_detail['Trạng thái'].isin(
-        STRICT_MATCH_STATUSES
+group_ids = {
+    key: number
+    for number, key in enumerate(
+        sorted(confirmed_keys),
+        start=1
     )
+}
+
+df_duplicate_groups = df_new_unique[
+    df_new_unique['Duplicate key'].isin(confirmed_keys)
 ].copy()
 
-df_pair_detail_loose = df_pair_detail[
-    ~df_pair_detail['Trạng thái'].isin(
-        STRICT_MATCH_STATUSES
-    )
-].copy()
+if not df_duplicate_groups.empty:
 
-
-# 4.8. Tạo bảng nhóm Item New trùng tin cậy cao
-strict_items = set()
-
-if not df_pair_detail_strict.empty:
-    strict_items.update(
-        df_pair_detail_strict['item new 1'].tolist()
-    )
-    strict_items.update(
-        df_pair_detail_strict['item new 2'].tolist()
-    )
-
-
-# Tổng hợp toàn bộ Code A theo Item New
-df_item_information = (
-    df_new_check
-    .groupby('item new', as_index=False)
-    .agg({
-        'Description new': join_unique_values,
-        'item code A': join_unique_values,
-        'item ksys': join_unique_values
-    })
-)
-
-df_item_information = df_item_information[
-    df_item_information['item new'].isin(strict_items)
-].copy()
-
-
-if not df_item_information.empty:
-    df_item_information['group_root'] = (
-        df_item_information['item new']
-        .apply(find)
-    )
-
-    # Chỉ giữ nhóm có ít nhất hai Item New
-    group_sizes = (
-        df_item_information
-        .groupby('group_root')['item new']
-        .transform('nunique')
-    )
-
-    df_duplicate_groups = df_item_information[
-        group_sizes >= 2
-    ].copy()
-
-    # Đánh số nhóm
-    unique_roots = sorted(
-        df_duplicate_groups['group_root'].unique()
-    )
-
-    group_ids = {
-        root: group_number
-        for group_number, root in enumerate(
-            unique_roots,
-            start=1
-        )
-    }
-
-    df_duplicate_groups['Nhóm nghi trùng số'] = (
-        df_duplicate_groups['group_root']
+    df_duplicate_groups['Nhóm trùng số'] = (
+        df_duplicate_groups['Duplicate key']
         .map(group_ids)
     )
 
     df_duplicate_groups = df_duplicate_groups[
         [
-            'Nhóm nghi trùng số',
+            'Nhóm trùng số',
             'item new',
             'Description new',
             'item code A',
-            'item ksys'
+            'Description code A',
+            'item ksys',
+            'Technical key',
+            'Color key',
+            'Origin key'
         ]
-    ].sort_values(
-        [
-            'Nhóm nghi trùng số',
-            'item new'
-        ]
-    )
+    ].rename(
+        columns={
+            'Technical key': 'Thông số kỹ thuật',
+            'Color key': 'Màu sắc',
+            'Origin key': 'Xuất xứ'
+        }
+    ).sort_values(
+        ['Nhóm trùng số', 'item new']
+    ).reset_index(drop=True)
 
 else:
     df_duplicate_groups = pd.DataFrame(
         columns=[
-            'Nhóm nghi trùng số',
+            'Nhóm trùng số',
             'item new',
             'Description new',
             'item code A',
-            'item ksys'
+            'Description code A',
+            'item ksys',
+            'Thông số kỹ thuật',
+            'Màu sắc',
+            'Xuất xứ'
         ]
     )
 
 
-# 4.9. Ghi kết quả vào Excel
+# =============================================================
+# 4.7. TẠO BẢNG CHI TIẾT CÁC CẶP TRÙNG
+# =============================================================
+
+for record in pair_records:
+    record['Nhóm trùng số'] = group_ids[
+        record['Duplicate key']
+    ]
+
+    del record['Duplicate key']
+
+
+pair_columns = [
+    'Nhóm trùng số',
+
+    'item new 1',
+    'Description new 1',
+    'item code A 1',
+    'Description code A 1',
+    'item ksys 1',
+
+    'item new 2',
+    'Description new 2',
+    'item code A 2',
+    'Description code A 2',
+    'item ksys 2',
+
+    'Thông số kỹ thuật',
+    'Màu sắc',
+    'Xuất xứ',
+    'Trạng thái',
+    'Chi tiết'
+]
+
+df_duplicate_pairs = (
+    pd.DataFrame(
+        pair_records,
+        columns=pair_columns
+    )
+    .drop_duplicates(keep='first')
+    .reset_index(drop=True)
+)
+
+if not df_duplicate_pairs.empty:
+    df_duplicate_pairs = df_duplicate_pairs.sort_values(
+        [
+            'Nhóm trùng số',
+            'item new 1',
+            'item new 2'
+        ]
+    ).reset_index(drop=True)
+
+
+# =============================================================
+# 4.8. TÌM ITEM NEW CÓ NHIỀU ITEM CODE A KHÁC NHAU
+# =============================================================
+
+df_new_code_a_relation = (
+    df_new_check[
+        df_new_check['item code A'].ne('')
+    ]
+    .drop_duplicates(
+        subset=['item new', 'item code A'],
+        keep='first'
+    )
+)
+
+code_a_count_by_item_new = (
+    df_new_code_a_relation
+    .groupby('item new')['item code A']
+    .nunique()
+)
+
+multiple_code_a_items = code_a_count_by_item_new[
+    code_a_count_by_item_new > 1
+].index.tolist()
+
+
+# Chi tiết Item New có nhiều Item Code A
+df_multiple_code_a_detail = (
+    df_new_check[
+        df_new_check['item new'].isin(
+            multiple_code_a_items
+        )
+        & df_new_check['item code A'].ne('')
+    ]
+    .drop_duplicates(keep='first')
+    [
+        [
+            'item new',
+            'Description new',
+            'item code A',
+            'Description code A',
+            'item ksys'
+        ]
+    ]
+    .sort_values(
+        ['item new', 'item code A']
+    )
+    .reset_index(drop=True)
+)
+
+
+# Tổng hợp Item New có nhiều Item Code A
+if not df_multiple_code_a_detail.empty:
+
+    df_multiple_code_a_summary = (
+        df_multiple_code_a_detail
+        .groupby('item new', as_index=False)
+        .agg(
+            so_luong_code_a=(
+                'item code A',
+                'nunique'
+            ),
+            danh_sach_code_a=(
+                'item code A',
+                join_unique_values
+            ),
+            danh_sach_description_new=(
+                'Description new',
+                join_unique_values
+            ),
+            danh_sach_item_ksys=(
+                'item ksys',
+                join_unique_values
+            )
+        )
+        .rename(
+            columns={
+                'so_luong_code_a':
+                    'Số lượng Item Code A',
+                'danh_sach_code_a':
+                    'Danh sách Item Code A',
+                'danh_sach_description_new':
+                    'Danh sách Description New',
+                'danh_sach_item_ksys':
+                    'Danh sách Item Ksys'
+            }
+        )
+        .sort_values(
+            ['Số lượng Item Code A', 'item new'],
+            ascending=[False, True]
+        )
+        .reset_index(drop=True)
+    )
+
+else:
+    df_multiple_code_a_summary = pd.DataFrame(
+        columns=[
+            'item new',
+            'Số lượng Item Code A',
+            'Danh sách Item Code A',
+            'Danh sách Description New',
+            'Danh sách Item Ksys'
+        ]
+    )
+
+
+# =============================================================
+# 4.9. GHI KẾT QUẢ VÀO FILE EXCEL
+# =============================================================
+
 with pd.ExcelWriter(
     output_filename,
     engine='openpyxl',
@@ -619,42 +916,58 @@ with pd.ExcelWriter(
 
     df_duplicate_groups.to_excel(
         writer,
-        sheet_name='Nhóm Item New trùng',
+        sheet_name='Item New trùng Description',
         index=False
     )
 
-    df_pair_detail_strict.to_excel(
+    df_duplicate_pairs.to_excel(
         writer,
-        sheet_name='Chi tiết trùng tin cậy',
+        sheet_name='Chi tiết Item New trùng',
         index=False
     )
 
-    df_pair_detail_loose.to_excel(
+    df_multiple_code_a_summary.to_excel(
         writer,
-        sheet_name='Nghi trùng cần rà',
+        sheet_name='Item New nhiều Code A',
+        index=False
+    )
+
+    df_multiple_code_a_detail.to_excel(
+        writer,
+        sheet_name='Chi tiết New nhiều Code A',
         index=False
     )
 
 
-# 4.10. Thống kê
-n_groups = (
-    df_duplicate_groups['Nhóm nghi trùng số'].nunique()
+# =============================================================
+# 4.10. THỐNG KÊ
+# =============================================================
+
+n_duplicate_groups = (
+    df_duplicate_groups['Nhóm trùng số'].nunique()
     if not df_duplicate_groups.empty
     else 0
 )
 
-n_items = (
+n_duplicate_items = (
     df_duplicate_groups['item new'].nunique()
     if not df_duplicate_groups.empty
     else 0
 )
 
-n_code_a = (
-    df_duplicate_groups['item code A'].nunique()
-    if not df_duplicate_groups.empty
-    else 0)
+n_multiple_code_a = len(multiple_code_a_items)
 
-print(f"    + Item New trùng tin cậy cao: "f"{n_groups} nhóm / {n_items} mã")
-print(f"    + Cặp trùng tin cậy cao: "f"{len(df_pair_detail_strict)} cặp")
-print(f"    + Cặp nghi trùng cần rà thêm: "f"{len(df_pair_detail_loose)} cặp")
-print(f"    + Item Code A liên quan: "f"{n_code_a} nhóm giá trị")
+print(
+    f"    + Item New trùng Description: "
+    f"{n_duplicate_groups} nhóm / {n_duplicate_items} mã"
+)
+
+print(
+    f"    + Cặp Item New trùng Description: "
+    f"{len(df_duplicate_pairs)} cặp"
+)
+
+print(
+    f"    + Item New có nhiều Item Code A: "
+    f"{n_multiple_code_a} mã"
+)
