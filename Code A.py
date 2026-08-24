@@ -17,7 +17,8 @@
      Lệch Item Name (khớp phần sau), hoặc các loại Lệch (loại vật tư /
      thông số / màu / xuất xứ).
    - Thứ tự từ được GIỮ NGUYÊN để phân biệt màu ('GREEN/YELLOW' khác
-     'YELLOW/GREEN') và cấu hình ('R/2+W/3' khác 'R/3+W/2'). 
+     'YELLOW/GREEN') và cấu hình ('R/2+W/3' khác 'R/3+W/2'). Tuyệt đối
+     không dùng set() làm mất thứ tự khi in ra báo cáo.
 =============================================================================
 """
 
@@ -177,14 +178,6 @@ MEASURE_LABEL_BLACKLIST = {
     'sq', 'sqmm', 'sqm', 'mm', 'cm', 'pi', 'ea', 'pcs', 'set', 'cl',
 }
 
-# Mảnh model thường là "nhiễu" do dính vào mã: tên hãng/xuất xứ/tiền tố -
-# không tính khi xét hai model có khác gốc hay không.
-MODEL_NOISE_FRAGMENTS = {
-    'ac', 'dc', 'v', 'ys',
-    'hyundai', 'hengzhu', 'china', 'korea', 'vietnam', 'japan',
-    'se', 'tse', 'vina',
-}
-
 # SH CABLE / SH VINA CABLE và COSMOLINK (VINA) là CÙNG một NCC (đổi tên).
 SUPPLIER_ALIASES = {
     'sh cable': 'cosmolink',
@@ -235,30 +228,11 @@ def normalize_numbers(text):
     return text
 
 
-VOLTAGE_PREFIX = re.compile(r'\b(ac|dc)[\s\-]*(\d+(?:[./]\d+)*)\s*v\b')
-VOLTAGE_SUFFIX = re.compile(r'\b(\d+(?:[./]\d+)*)\s*v(ac|dc)\b')
-VOLTAGE_PLAIN = re.compile(r'\b(\d+(?:[./]\d+)*)\s*v\b')
-
-
-def normalize_voltage(text):
-    """
-    Chuẩn hóa điện áp về một dạng thống nhất '<số>v<ac|dc>' để:
-        'DC110V' == '110VDC' == '110V DC'  -> '110vdc'
-        'AC200/220V' == '200/220VAC'       -> '200/220vac'
-        '240V'                              -> '240v'
-    Nhờ đó cách viết prefix/suffix AC/DC không còn gây lệch giả.
-    """
-    text = VOLTAGE_PREFIX.sub(lambda m: f'{m.group(2)}v{m.group(1)}', text)
-    text = VOLTAGE_SUFFIX.sub(lambda m: f'{m.group(1)}v{m.group(2)}', text)
-    return text
-
-
 def normalize_text(text):
     s = remove_diacritics(str(text).lower())
     for pattern, replacement in PHRASE_RULES:
         s = pattern.sub(replacement, s)
     s = CLASS5_PATTERN.sub(' ', s)
-    s = normalize_voltage(s)
     return normalize_numbers(s)
 
 
@@ -536,52 +510,12 @@ def _compare_attributes(sig1, sig2):
     if conflicts:
         return DIFF_SPEC, '; '.join(conflicts)
 
-    # Model: KHÔNG so chuỗi thô (dễ báo giả khi model bị dính tên hãng/xuất
-    # xứ, thêm prefix nhà sản xuất, hay tách/gộp khác nhau). Thay vào đó tách
-    # mỗi model thành tập mảnh chữ-số rồi xét quan hệ tập hợp: chỉ coi là
-    # LỆCH khi mỗi bên có mảnh RIÊNG mà không bên nào là tập con bên kia
-    # (tức hai định danh khác gốc thực sự). Các trường hợp một bên chỉ dài
-    # hơn (dính hãng, prefix) sẽ là tập cha/con -> không lệch.
-    frags1 = _model_fragments(sig1.model_codes)
-    frags2 = _model_fragments(sig2.model_codes)
-    if frags1 and frags2 and not (frags1 <= frags2 or frags2 <= frags1):
-        only1 = frags1 - frags2
-        only2 = frags2 - frags1
-        only1 -= MODEL_NOISE_FRAGMENTS
-        only2 -= MODEL_NOISE_FRAGMENTS
-        # Bỏ các mảnh mà một bên chỉ là tiền tố/hậu tố chuỗi của mảnh bên
-        # kia (vd 'dnc' ⊂ 'ysdnc' do thêm prefix nhà sản xuất) -> không lệch.
-        only1, only2 = _drop_affix_matches(only1, only2)
-        if only1 and only2:
-            return DIFF_SPEC, (
-                f'model {sorted(only1)} ↔ {sorted(only2)}')
+    only1 = sig1.model_codes - sig2.model_codes
+    only2 = sig2.model_codes - sig1.model_codes
+    if only1 and only2:
+        return DIFF_SPEC, f'model {sorted(only1)} ↔ {sorted(only2)}'
 
     return None
-
-
-def _drop_affix_matches(only1, only2):
-    """Loại khỏi hai tập những mảnh chữ mà một bên là tiền tố/hậu tố chuỗi
-    của một mảnh bên kia (vd 'dnc' vs 'ysdnc', 'mr' vs 'mrb')."""
-    matched1, matched2 = set(), set()
-    for a in only1:
-        for b in only2:
-            if a.isalpha() and b.isalpha() and (
-                a.endswith(b) or b.endswith(a)
-                or a.startswith(b) or b.startswith(a)
-            ):
-                matched1.add(a)
-                matched2.add(b)
-    return only1 - matched1, only2 - matched2
-
-
-def _model_fragments(model_codes):
-    """Tập mảnh chữ-số của toàn bộ model codes (bỏ mảnh 1 ký tự nhiễu)."""
-    frags = set()
-    for model in model_codes:
-        for piece in re.findall(r'[a-z]+|\d+', model):
-            if len(piece) >= 2 or piece.isdigit():
-                frags.add(piece)
-    return frags
 
 
 def _format_words(word_counter):
