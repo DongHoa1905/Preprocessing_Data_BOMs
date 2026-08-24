@@ -1,14 +1,31 @@
-import pandas as pd
-import numpy as np
+# -*- coding: utf-8 -*-
+"""
+=============================================================================
+ KIỂM TRA ĐỐI CHIẾU DANH MỤC VẬT TƯ: CODE A  <->  KSYS  <->  CODE NEW
+=============================================================================
+ Phần 1 : So sánh UOM
+ Phần 2 : So sánh Description (Smart Specs Matching - 5 lớp)
+ Phần 3 : Xuất báo cáo lệch UOM / Description
+ Phần 4 : Kiểm tra trùng lặp trong hệ mã New  
+ Phần 5 : Cảnh báo chất lượng dữ liệu         
+=============================================================================
+"""
+
 import re
 import unicodedata
+from collections import Counter
+from dataclasses import dataclass, field as dc_field
+import pandas as pd
 
-# 1. Đọc dữ liệu
-file_name = 'Code A check.xlsx'
-df = pd.read_excel(file_name)
 
-# 2. Đổi tên cột 
-rename_map = {
+# =============================================================================
+# 0. CẤU HÌNH CHUNG
+# =============================================================================
+
+INPUT_FILE = 'Code A check.xlsx'
+OUTPUT_FILE = 'Check uom & description.xlsx'
+
+COLUMN_RENAME_MAP = {
     'Item': 'item code A',
     'Item Ksys': 'item ksys',
     'Code mới': 'item new',
@@ -17,43 +34,69 @@ rename_map = {
     'Spect mới': 'Description new',
     'UOM': 'uom code A',
     'UOM Ksys': 'uom ksys',
-    'Unit': 'uom new'
+    'Unit': 'uom new',
 }
 
-# 3. Tối ưu cột
-df = df[list(rename_map.keys())].rename(columns=rename_map)
+CODE_COLUMNS = ['item code A', 'item ksys', 'item new']
+FFILL_COLUMNS = ['item code A', 'Description code A', 'uom code A']
 
-# 4. Làm sạch mã Item (Xóa đuôi .0 và khoảng trắng thừa)
-for col in ['item code A', 'item ksys', 'item new']:
-    df[col] = (
-        df[col]
-        .fillna('')
-        .astype(str)
-        .str.replace(r'\.0$', '', regex=True)
-        .str.strip()
-    )
+INVALID_DESCRIPTION_VALUES = [
+    'n/a', 'na', 'null', 'nan', 'none', '', '0', '0.0',
+]
 
-# 5. Kế thừa ô gộp (ffill) cho các cột dữ liệu Code A gốc
-ffill_cols = ['item code A', 'Description code A', 'uom code A']
-df[ffill_cols] = df[ffill_cols].ffill()
 
-# 6. Loại bỏ các hàng có 'Description new' là Null, N/A, khoảng trắng, bằng 0,
-#    hoặc không chứa chữ cái nào (toàn số/toàn ký tự đặc biệt -> chắc chắn là dữ liệu rác/dòng thừa)
-df = df.dropna(subset=['Description new']).copy()
-desc_new_clean = df['Description new'].astype(str).str.strip().str.lower()
-invalid_values = ['n/a', 'na', 'null', 'nan', 'none', '', '0', '0.0']
-is_invalid_value = desc_new_clean.isin(invalid_values)
-has_no_letter = ~desc_new_clean.str.contains(r'[a-zA-ZÀ-ỹ]', regex=True, na=True)
-df = df[~(is_invalid_value | has_no_letter)].copy()
+# =============================================================================
+# 1. ĐỌC & LÀM SẠCH DỮ LIỆU
+# =============================================================================
 
-# ==================== PHẦN 1: SO SÁNH UOM ====================
+def load_dataset(file_name=INPUT_FILE):
+    """Đọc file nguồn, đổi tên cột, làm sạch mã và loại dòng rác."""
+    raw = pd.read_excel(file_name)
 
-# Từ điển ánh xạ từ viết tắt sang tên chuẩn
-uom_mapping = {
+    df = raw[list(COLUMN_RENAME_MAP.keys())].rename(columns=COLUMN_RENAME_MAP)
+
+    # Làm sạch mã Item (xóa đuôi '.0' do Excel ép kiểu số và khoảng trắng thừa)
+    for column in CODE_COLUMNS:
+        df[column] = (
+            df[column]
+            .fillna('')
+            .astype(str)
+            .str.replace(r'\.0$', '', regex=True)
+            .str.strip()
+        )
+
+    # Kế thừa ô gộp (merged cell) cho khối dữ liệu Code A gốc
+    df[FFILL_COLUMNS] = df[FFILL_COLUMNS].ffill()
+
+    return df
+
+
+def drop_invalid_description_new(df):
+    """
+    Loại dòng có 'Description new' rỗng / N/A / bằng 0 / không chứa chữ cái.
+    Trả về (df_hợp_lệ, df_bị_loại) để Phần 5 còn truy vết được.
+    """
+    has_value = df['Description new'].notna()
+
+    cleaned = df['Description new'].astype(str).str.strip().str.lower()
+    is_invalid_value = cleaned.isin(INVALID_DESCRIPTION_VALUES)
+    has_no_letter = ~cleaned.str.contains(r'[a-zA-ZÀ-ỹ]', regex=True, na=True)
+
+    keep_mask = has_value & ~(is_invalid_value | has_no_letter)
+
+    return df[keep_mask].copy(), df[~keep_mask].copy()
+
+
+# =============================================================================
+# PHẦN 1: SO SÁNH UOM
+# =============================================================================
+
+UOM_MAPPING = {
     'rol': 'roll',
     'sht': 'sheet',
-    'pnl': 'panel'
+    'pnl': 'panel',
 }
+
 
 def clean_uom(series):
     return (
@@ -62,24 +105,32 @@ def clean_uom(series):
         .str.replace(r'[\r\n\t\xa0]', '', regex=True)
         .str.strip()
         .str.lower()
-        .replace(uom_mapping)
+        .replace(UOM_MAPPING)
     )
 
-uom_a_clean = clean_uom(df['uom code A'])
-uom_ksys_clean = clean_uom(df['uom ksys'])
-uom_new_clean = clean_uom(df['uom new'])
 
-df['uom_ksys_match'] = (uom_a_clean == uom_ksys_clean)
-df['uom_new_match'] = (uom_a_clean == uom_new_clean)
+def compare_uom(df):
+    uom_a = clean_uom(df['uom code A'])
 
-df['Trạng thái UOM (Code A vs Ksys)'] = df['uom_ksys_match'].map({True: 'Khớp', False: 'Lệch'})
-df['Trạng thái UOM (Code A vs New)'] = df['uom_new_match'].map({True: 'Khớp', False: 'Lệch'})
+    df['uom_ksys_match'] = uom_a == clean_uom(df['uom ksys'])
+    df['uom_new_match'] = uom_a == clean_uom(df['uom new'])
+
+    df['Trạng thái UOM (Code A vs Ksys)'] = df['uom_ksys_match'].map(
+        {True: 'Khớp', False: 'Lệch'}
+    )
+    df['Trạng thái UOM (Code A vs New)'] = df['uom_new_match'].map(
+        {True: 'Khớp', False: 'Lệch'}
+    )
+
+    return df
 
 
-# ==================== PHẦN 2: SO SÁNH DESCRIPTION (SMART SPECS MATCHING - 5 LỚP) ====================
+# =============================================================================
+# PHẦN 2: SO SÁNH DESCRIPTION (SMART SPECS MATCHING - 5 LỚP)
+# =============================================================================
+
 WORD_MAP = {
-    # Màu sắc
-# Bổ sung mã màu dây điện chuẩn IEC 60757 & các biến thể viết tắt
+    # --- Màu sắc: mã màu dây điện IEC 60757 & các biến thể viết tắt ---
     'bk': 'black', 'blk': 'black', 'bla': 'black',
     'bn': 'brown', 'brn': 'brown',
     'rd': 'red',
@@ -91,58 +142,73 @@ WORD_MAP = {
     'gy': 'grey', 'gry': 'grey', 'gray': 'grey',
     'wh': 'white', 'wht': 'white',
     'pk': 'pink', 'pnk': 'pink',
-    # Dây tiếp địa 2 màu (Green-Yellow)
+    # Dây tiếp địa 2 màu
     'gnye': 'greenyellow', 'gnyel': 'greenyellow', 'yegn': 'greenyellow',
-    # Xuất xứ
+    # --- Xuất xứ ---
     'vn': 'vietnam', 'vnm': 'vietnam', 'cn': 'china', 'chn': 'china',
     'kr': 'korea', 'kor': 'korea', 'jp': 'japan', 'jpn': 'japan',
     'tw': 'taiwan', 'twn': 'taiwan', 'de': 'germany', 'deu': 'germany',
-    # thông số kỹ thuật (đơn vị mm² viết theo nhiều kiểu -> quy về 1 dạng chuẩn duy nhất)
-    'sqmm': 'sqmm', 'mmsq': 'sqmm', 'sq': 'sqmm','fr': 'flameretardant',
-    'fr': 'flameretardant','hpvc': 'hpvc','vina': 'vietnam'
+    'vina': 'vietnam',
+    # --- Thông số kỹ thuật (mm² viết nhiều kiểu -> quy về 1 dạng chuẩn) ---
+    'sqmm': 'sqmm', 'mmsq': 'sqmm', 'sq': 'sqmm',
+    'fr': 'flameretardant',
+    'hpvc': 'hpvc',
 }
 
-COLOR_SET = {'black', 'red', 'blue', 'yellow', 'white', 'green', 'orange', 'grey', 'brown'}
+COLOR_SET = {
+    'black', 'red', 'blue', 'yellow', 'white',
+    'green', 'orange', 'grey', 'brown',
+}
+
 ORIGIN_SET = {'vietnam', 'china', 'korea', 'japan', 'taiwan', 'germany'}
 
-# ==================== HÀM BỔ TRỢ CHUẨN HÓA DỮ LIỆU ====================
+MATCH_STATUSES = {'Khớp tuyệt đối', 'Khớp chứa nhau', 'Khớp tương đối'}
 
-# ==================== HÀM TIỀN XỬ LÝ & BÓC TÁCH DỮ LIỆU ====================
+
+# ---------------------------------------------------------------------------
+# 2.1. Hàm tiền xử lý dùng chung
+# ---------------------------------------------------------------------------
 
 def remove_diacritics(text):
-    """Xóa dấu tiếng Việt"""
+    """Xóa dấu tiếng Việt."""
     if not isinstance(text, str):
-        return ""
+        return ''
+
     text = unicodedata.normalize('NFD', text)
-    return re.sub(r'[\u0300-\u036f]', '', text).replace('đ', 'd').replace('Đ', 'D')
+
+    return (
+        re.sub(r'[\u0300-\u036f]', '', text)
+        .replace('đ', 'd')
+        .replace('Đ', 'D')
+    )
+
 
 def normalize_numbers(text):
-    """Chuẩn hóa định dạng số thập phân và quy đổi số nguyên"""
-    # LƯU Ý: Đã khảo sát toàn bộ dữ liệu thực tế và xác nhận dấu phẩy trong mô tả
-    # LUÔN được dùng làm dấu phân cách giữa các trường thông số (vd '630,1250A' = 2 số),
-    # KHÔNG dùng làm dấu thập phân (số thập phân thật luôn viết bằng dấu chấm: '0.6KV', '1.5CL').
-    # Vì vậy KHÔNG quy đổi dấu phẩy -> dấu chấm nữa để tránh ghép nhầm 2 số liệt kê thành 1 số thập phân.
-    text = re.sub(r'(\d+)\.0+(?!\d)', r'\1', text)          # 6.0 -> 6
-    text = re.sub(r'(\d+\.\d*?[1-9])0+(?!\d)', r'\1', text) # 1.50 -> 1.5
+    """
+    Chuẩn hóa số thập phân: 6.0 -> 6, 1.50 -> 1.5.
+
+    LƯU Ý (đã khảo sát toàn bộ dữ liệu thực tế): dấu phẩy trong mô tả LUÔN
+    là dấu phân cách trường ('630,1250A' = 2 số), KHÔNG phải dấu thập phân
+    (số thập phân thật luôn viết bằng dấu chấm: '0.6KV', '1.5CL'). Vì vậy
+    tuyệt đối KHÔNG quy đổi ',' -> '.'.
+    """
+    text = re.sub(r'(\d+)\.0+(?!\d)', r'\1', text)
+    text = re.sub(r'(\d+\.\d*?[1-9])0+(?!\d)', r'\1', text)
+
     return text
 
 def split_digit_letter_runs(token):
     """
-    Tách một token dính liền chữ+số thành các token nhỏ hơn theo ranh giới số/chữ,
-    giữ nguyên số thập phân (vd 31.5 không bị tách rời).
-    Đây là chìa khóa xử lý 2 nhóm lỗi:
-      - Số dính liền đơn vị do thiếu khoảng trắng nguồn: '16mmsq' -> ['16','mmsq']
-      - Số dính liền tên khác (thiếu dấu phẩy nguồn): '64hengzhu' -> ['64','hengzhu']
-      - Số/chữ bị đảo thứ tự giữa 2 mô tả: '110vdc' -> ['110','vdc'], 'dc110v' -> ['dc','110','v']
-        (sau khi tách, số '110' ở cả 2 bên đều là token riêng độc lập -> so khớp được dù thứ tự đảo)
+    Tách token dính liền chữ+số theo ranh giới số/chữ, giữ nguyên số thập phân.
+        '16mmsq'    -> ['16', 'mmsq']       (thiếu khoảng trắng nguồn)
+        '64hengzhu' -> ['64', 'hengzhu']    (thiếu dấu phẩy nguồn)
+        '110vdc' / 'dc110v' -> số '110' tách riêng ở cả hai bên nên vẫn khớp
+                               được dù thứ tự chữ/số bị đảo.
     """
     return re.findall(r'\d+\.\d+|\d+|[a-z]+', token)
 
 def tokenize_and_clean(text, remove_class5=False):
-    """
-    Tách từ & làm sạch: coi ký tự đặc biệt và khoảng trắng là dấu phân cách.
-    Chỉ trích xuất chữ và số, giữ lại số thập phân.
-    """
+    """Tách từ & làm sạch: ký tự đặc biệt và khoảng trắng đều là dấu phân cách."""
     if text is None or pd.isna(text):
         return []
 
@@ -152,182 +218,524 @@ def tokenize_and_clean(text, remove_class5=False):
     s = re.sub(r'\bcosmolink\s+vina\b', 'cosmolink', s)
     s = normalize_numbers(s)
 
-    # CLASS 5 thừa ở Code New không được đem đi so sánh
+    # 'CLASS 5' thừa ở Code New không đem đi so sánh
     if remove_class5:
-        s = re.sub(
-            r'\bclass\s*[-:=]?\s*5(?:\.0)?\b',
-            ' ',
-            s
-        )
+        s = re.sub(r'\bclass\s*[-:=]?\s*5(?:\.0)?\b', ' ', s)
 
     # W40 -> 40, H60 -> 60, L2000 -> 2000, T2 -> 2, DIA10 -> 10
     s = re.sub(r'\b([whldt]|phi|dia)(\d+)', r'\2', s)
-
-    raw_tokens = re.findall(
-        r'[a-z0-9]+(?:\.[a-z0-9]+)*',
-        s
-    )
-
     tokens = []
 
-    for token in raw_tokens:
-        token = token.strip('.')
+    for raw_token in re.findall(r'[a-z0-9]+(?:\.[a-z0-9]+)*', s):
+        raw_token = raw_token.strip('.')
 
-        if not token:
+        if not raw_token:
             continue
 
-        for piece in split_digit_letter_runs(token):
+        for piece in split_digit_letter_runs(raw_token):
             tokens.append(WORD_MAP.get(piece, piece))
 
     return tokens
 
+
 def tokenize_no_parenthetical(text, remove_class5=False):
+    """Như `tokenize_and_clean` nhưng bỏ nội dung trong ngoặc đơn."""
     if text is None or pd.isna(text):
         return []
-
-    s = re.sub(r'\([^)]*\)', ' ', str(text))
-
     return tokenize_and_clean(
-        s,
-        remove_class5=remove_class5
+        re.sub(r'\([^)]*\)', ' ', str(text)),
+        remove_class5=remove_class5,
     )
-# ==================== PHẦN 2: SMART SPECS MATCHING (5 LỚP TỐI ƯU) ====================
 
-def smart_specs_matching(desc1, desc2,ignore_class5=False, threshold=0.8):
+
+# ---------------------------------------------------------------------------
+# 2.2. Smart Specs Matching
+# ---------------------------------------------------------------------------
+
+def smart_specs_matching(desc1, desc2, ignore_class5=False, threshold=0.8):
     t1 = tokenize_and_clean(desc1, remove_class5=ignore_class5)
     t2 = tokenize_and_clean(desc2, remove_class5=ignore_class5)
 
-    # -------------------------------------------------------------
-    # LỚP 0: Lọc rỗng & Khớp tuyệt đối
-    # -------------------------------------------------------------
+    # --- LỚP 0: Lọc rỗng & khớp tuyệt đối ---
     if not t1 and not t2:
-        return "Khớp tuyệt đối", "Cả hai mô tả đều rỗng"
+        return 'Khớp tuyệt đối', 'Cả hai mô tả đều rỗng'
     if not t1 or not t2:
-        return "Không khớp", "Một trong hai mô tả bị thiếu (rỗng)"
+        return 'Không khớp', 'Một trong hai mô tả bị thiếu (rỗng)'
     if t1 == t2:
-        return "Khớp tuyệt đối", "Hai chuỗi hoàn toàn giống nhau"
+        return 'Khớp tuyệt đối', 'Hai chuỗi hoàn toàn giống nhau'
 
-    # -------------------------------------------------------------
-    # LỚP 1: Kiểm tra Màu sắc & Xuất xứ (Chỉ báo lỗi khi CẢ 2 BÊN CÙNG CÓ nhưng KHÁC NHAU)
-    # Bỏ qua nội dung trong ngoặc () vì đó thường là chú giải viết tắt, không phải màu/xuất xứ thật khác biệt.
-    # -------------------------------------------------------------
-    t1_np, t2_np = tokenize_no_parenthetical(desc1, remove_class5=ignore_class5), tokenize_no_parenthetical(desc2, remove_class5=ignore_class5)
+    # --- LỚP 1: Màu sắc & xuất xứ (chỉ báo lỗi khi CẢ HAI cùng có mà khác) ---
+    # Bỏ qua nội dung trong ngoặc vì đó thường là chú giải viết tắt.
+    t1_np = tokenize_no_parenthetical(desc1, remove_class5=ignore_class5)
+    t2_np = tokenize_no_parenthetical(desc2, remove_class5=ignore_class5)
 
-    c1, c2 = {w for w in t1_np if w in COLOR_SET}, {w for w in t2_np if w in COLOR_SET}
+    c1 = {w for w in t1_np if w in COLOR_SET}
+    c2 = {w for w in t2_np if w in COLOR_SET}
     if c1 and c2 and c1 != c2:
-        return "Lỗi lệch màu/xuất xứ", f"Lệch màu sắc: {c1} vs {c2}"
+        return 'Lỗi lệch màu/xuất xứ', f'Lệch màu sắc: {c1} vs {c2}'
 
-    o1, o2 = {w for w in t1_np if w in ORIGIN_SET}, {w for w in t2_np if w in ORIGIN_SET}
+    o1 = {w for w in t1_np if w in ORIGIN_SET}
+    o2 = {w for w in t2_np if w in ORIGIN_SET}
     if o1 and o2 and o1 != o2:
-        return "Lỗi lệch màu/xuất xứ", f"Lệch xuất xứ: {o1} vs {o2}"
+        return 'Lỗi lệch màu/xuất xứ', f'Lệch xuất xứ: {o1} vs {o2}'
 
-    # Phân định chuỗi Dài / Ngắn
-    if len(t1) >= len(t2):
-        t_long, t_short = t1, t2
-    else:
-        t_long, t_short = t2, t1
+    t_long, t_short = (t1, t2) if len(t1) >= len(t2) else (t2, t1)
 
-    # -------------------------------------------------------------
-    # LỚP 2: Kiểm tra Con số / Thông số kỹ thuật
-    # -------------------------------------------------------------
-    specs_short = [w for w in t_short if re.search(r'\d', w)]
-    missing_specs = []
-    
-    for s in specs_short:
-        # Khớp từ độc lập HOẶC nằm trong một mã Model gộp (vd: '1215' nằm trong 'ysr1215gw')
-        if (s in t_long) or (len(s) >= 3 and any(s in token for token in t_long)):
-            continue
-        missing_specs.append(s)
+    def is_covered(word):
+        return (
+            word in t_long
+            or (len(word) >= 3 and any(word in token for token in t_long))
+        )
+
+    # --- LỚP 2: Con số / thông số kỹ thuật ---
+    missing_specs = [
+        w for w in t_short
+        if re.search(r'\d', w) and not is_covered(w)
+    ]
 
     if missing_specs:
-        return "Lỗi lệch con số/kích thước", f"Sai lệch thông số: {', '.join(missing_specs)}"
+        return (
+            'Lỗi lệch con số/kích thước',
+            f"Sai lệch thông số: {', '.join(missing_specs)}",
+        )
 
-    # -------------------------------------------------------------
-    # LỚP 3: Kiểm tra Khớp chứa nhau (Bản tóm tắt)
-    # -------------------------------------------------------------
-    matched_words = sum(
-        1 for w in t_short 
-        if (w in t_long) or (len(w) >= 3 and any(w in token for token in t_long))
-    )
+    # --- LỚP 3: Khớp chứa nhau (bản tóm tắt) ---
+    matched_words = sum(1 for w in t_short if is_covered(w))
 
     if matched_words == len(t_short):
-        return "Khớp chứa nhau", "Chuỗi ngắn là bản tóm tắt nằm trọn trong chuỗi dài"
+        return (
+            'Khớp chứa nhau',
+            'Chuỗi ngắn là bản tóm tắt nằm trọn trong chuỗi dài',
+        )
 
-    # -------------------------------------------------------------
-    # LỚP 4: Độ phủ từ còn lại (Word Coverage Ratio)
-    # -------------------------------------------------------------
+    # --- LỚP 4: Độ phủ từ còn lại ---
     coverage = matched_words / len(t_short) if t_short else 0.0
+
     if coverage >= threshold:
-        return "Khớp tương đối", f"Độ phủ từ đạt {coverage*100:.1f}%"
-    
-    return "Không khớp", f"Độ phủ từ chỉ đạt {coverage*100:.1f}% (< {int(threshold*100)}%)"
+        return 'Khớp tương đối', f'Độ phủ từ đạt {coverage * 100:.1f}%'
 
-
-# ==================== PHẦN 3: THI CÔNG SO SÁNH & XUẤT BÁO CÁO ====================
-
+    return (
+        'Không khớp',
+        f'Độ phủ từ chỉ đạt {coverage * 100:.1f}% (< {int(threshold * 100)}%)',
+    )
 def run_matching(df, col_a, col_target, prefix, ignore_class5=False):
-    """Hàm gộp xử lý matching theo cặp cột"""
-    res = df.apply(lambda row: smart_specs_matching(
-        row[col_a], 
-        row[col_target], 
-        ignore_class5=ignore_class5
-    ), axis=1)
-    df[f'Trạng thái Desc ({prefix})'] = [r[0] for r in res]
-    df[f'Chi tiết Desc ({prefix})'] = [r[1] for r in res]
+    """Chạy matching cho một cặp cột và ghi kết quả vào df."""
+    results = df.apply(
+        lambda row: smart_specs_matching(
+            row[col_a], row[col_target], ignore_class5=ignore_class5
+        ),
+        axis=1,
+    )
 
-# Thực thi kiểm tra cho cả Ksys và New
-run_matching(df, 'Description code A', 'Description ksys', 'Code A vs Ksys', ignore_class5=False)
-run_matching(df, 'Description code A', 'Description new', 'Code A vs New', ignore_class5=True)
+    df[f'Trạng thái Desc ({prefix})'] = [r[0] for r in results]
+    df[f'Chi tiết Desc ({prefix})'] = [r[1] for r in results]
 
-# Tập hợp các trạng thái được coi là hợp lệ (Không tính là lệch)
-MATCH_STATUSES = {'Khớp tuyệt đối', 'Khớp chứa nhau', 'Khớp tương đối'}
+    return df
 
-# Lọc danh sách lệch UOM
-df_uom_diff_ksys = df[~df['uom_ksys_match']].copy()
-df_uom_diff_new = df[~df['uom_new_match']].copy()
 
-# Lọc danh sách lệch Description
-df_desc_diff_ksys = df[~df['Trạng thái Desc (Code A vs Ksys)'].isin(MATCH_STATUSES)].copy()
-# Lọc lệch Description giữa Code A và New
-df_desc_diff_new = df[~df['Trạng thái Desc (Code A vs New)'].isin(MATCH_STATUSES)].copy()
+# =============================================================================
+# PHẦN 4: KIỂM TRA TRÙNG LẶP TRONG HỆ MÃ NEW
+# =============================================================================
+"""
+Triết lý thiết kế (đáp ứng yêu cầu 4 & 5):
 
-# Lưu số dòng trước khi loại duplicate
-desc_diff_new_before_dedup = len(df_desc_diff_new)
+    KHÔNG kết luận nghi trùng dựa trên "độ giống nhau của câu chữ".
+    Mỗi Description New được bóc tách thành một CHỮ KÝ CÓ CẤU TRÚC
+    (ItemSignature), sau đó so khớp THUỘC TÍNH-VỚI-THUỘC TÍNH.
 
-# Loại hàng trùng hoàn toàn trên tất cả các cột
-df_desc_diff_new = (
-    df_desc_diff_new
-    .drop_duplicates(keep='first')
-    .reset_index(drop=True)
-)
+Vì sao phải so khớp theo TRƯỜNG (field) thay vì "túi từ" (bag of words)?
+    Mô tả trong dữ liệu luôn có dạng phân tách bằng dấu phẩy:
+        <LOẠI VẬT TƯ>,<TÊN/MODEL>,<THÔNG SỐ>,...,<MÀU>,<XUẤT XỨ>
+    Làm phẳng thành tập hợp từ sẽ phá vỡ quan hệ nhãn-giá trị và sinh ra
+    kết luận SAI. Hai ví dụ CÓ THẬT trong dữ liệu này:
 
-removed_desc_diff_new_duplicates = (
-    desc_diff_new_before_dedup - len(df_desc_diff_new)
-)
-# Xuất dữ liệu đa sheet ra Excel
-output_filename = 'Check uom & description.xlsx'
+      (a) 'NUT,HEX NUT,M5,SWCH,Ep-Fe/Zn 5/CM2(Cr3/White)'
+          'NUT,HEX NUT,M4,SWCH,Ep-Fe/Zn 5/CM2(Cr3/White)'
+          -> tập từ bản M5 lại là TẬP CON của bản M4 (vì số 5 vẫn còn trong
+             'Zn 5'). Túi từ kết luận trùng. THỰC TẾ: khác cỡ ren.
 
-with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
-    df_desc_diff_ksys.to_excel(writer, sheet_name='Lệch Desc (Code A vs Ksys)', index=False)
-    df_desc_diff_new.to_excel(writer, sheet_name='Lệch Desc (Code A vs New)', index=False)
-    df_uom_diff_ksys.to_excel(writer, sheet_name='Lệch UOM (Code A vs Ksys)', index=False)
-    df_uom_diff_new.to_excel(writer, sheet_name='Lệch UOM (Code A vs New)', index=False)
-    df.to_excel(writer, sheet_name='Toàn bộ Data Checked', index=False)
+      (b) 'LAMP,YSBRL34-DL11-RW,1x5(R/2+W/3),DC110V,...'
+          'LAMP,YSBRL34-DL11-RW,1x5(R/3+W/2),DC110V,...'
+          -> hai tập từ {1,5,r,2,w,3} giống hệt nhau. Túi từ kết luận trùng.
+             THỰC TẾ: 2 đỏ+3 trắng khác 3 đỏ+2 trắng.
 
-print(f"--> Xuất thành công file gộp: '{output_filename}'")
-print(f"    + Lệch UOM  : Ksys ({len(df_uom_diff_ksys)}) | New ({len(df_uom_diff_new)})")
-print(f"    + Lệch Desc : Ksys ({len(df_desc_diff_ksys)}) | New ({len(df_desc_diff_new)})")
+    So khớp theo trường giữ nguyên thứ tự bên trong từng trường nên chặn
+    được cả hai lỗi trên.
 
-# ==================== PHẦN 4: TÌM ITEM NEW NGHI TRÙNG MÔ TẢ ====================
-# Mục tiêu: trong hệ mã New, tìm những mã item KHÁC NHAU nhưng mô tả (sau chuẩn hóa)
-# lại khớp nhau theo đúng thuật toán smart_specs_matching ở trên -> nghi bị tạo trùng item.
+Ba bài toán độc lập:
+    4A. Item New nghi trùng Description New
+        - Mức 1 (Trùng hoàn toàn): mọi trường khớp tuyệt đối sau chuẩn hóa.
+        - Mức 2 (Thiếu thông tin) : một bên là tập con của bên kia VÀ phần
+                                    chênh lệch không chứa bất kỳ con số nào.
+    4B. Item New gắn với nhiều Item Code A khác nhau.
+    4C. (xem Phần 5) Cảnh báo chất lượng dữ liệu.
+"""
 
-# =============================================================
-# 4.1. HÀM HỖ TRỢ
-# =============================================================
+# ---------------------------------------------------------------------------
+# 4.0. Cấu hình riêng cho Phần 4
+# ---------------------------------------------------------------------------
+# Phần 4 dùng bộ chuẩn hóa RIÊNG, KHÔNG sửa `tokenize_and_clean` của Phần 2
+# để không làm thay đổi output của Phần 1-3.
+
+PART4_PHRASE_RULES = [
+    (re.compile(r'\bflame[\s\-]+retardant\b'), 'fr'),
+    (re.compile(r'\bh[\s\-]*pvc\b'), 'hpvc'),
+    (re.compile(r'\bcosmolink\s+vina\b'), 'cosmolink'),
+    # 'VIET NAM' viết tách phải quy về 'vietnam', nếu không bộ lọc xuất xứ
+    # sẽ bị vô hiệu với toàn bộ các dòng đang viết tách (159 lượt trong data).
+    (re.compile(r'\bviet\s+nam\b'), 'vietnam'),
+    (re.compile(r'\bsouth\s+korea\b'), 'korea'),
+]
+
+CLASS5_PATTERN = re.compile(r'\bclass\s*[-:=]?\s*5(?:\.0)?\b')
+TOKEN_PATTERN = re.compile(r'\d+\.\d+|\d+|[a-z]+')
+PARENTHETICAL_PATTERN = re.compile(r'\([^)]*\)')
+DIGIT_PATTERN = re.compile(r'\d')
+
+# Nhận diện cặp NHÃN-GIÁ TRỊ dính liền: 'M12' -> m=12, '110V' -> v=110
+LABEL_BEFORE_VALUE = re.compile(r'\b([a-z]{1,3})(\d+(?:\.\d+)?)\b')
+VALUE_BEFORE_LABEL = re.compile(r'\b(\d+(?:\.\d+)?)([a-z]{1,4})\b')
+
+# Mã model/quy cách: cụm chữ-số có dấu nối, ví dụ 'ysbrl34-dl11-rw', 'din912'
+MODEL_CODE_PATTERN = re.compile(r'[a-z0-9]+(?:[\-/][a-z0-9]+)*')
+
+PART4_COLOR_SET = COLOR_SET | {'violet', 'pink', 'greenyellow'}
+
+# Bổ sung các quốc gia thực sự xuất hiện trong dữ liệu nhưng thiếu ở ORIGIN_SET
+PART4_ORIGIN_SET = ORIGIN_SET | {
+    'italy', 'indonesia', 'turkey', 'malaysia',
+    'india', 'usa', 'france', 'thailand', 'singapore',
+}
+
+LEVEL_EXACT = 'Mức 1 - Khớp tuyệt đối'
+LEVEL_SUBSET = 'Mức 2 - Khớp chứa nhau (thiếu dữ kiện)'
+
+
+# ---------------------------------------------------------------------------
+# 4.1. Chuẩn hóa & bóc tách thuộc tính
+# ---------------------------------------------------------------------------
+
+def _normalize_raw_text(text):
+    """Đưa mô tả thô về chữ thường, bỏ dấu, gộp cụm đồng nghĩa, bỏ CLASS 5."""
+    s = remove_diacritics(str(text).lower())
+
+    for pattern, replacement in PART4_PHRASE_RULES:
+        s = pattern.sub(replacement, s)
+
+    s = CLASS5_PATTERN.sub(' ', s)
+
+    return normalize_numbers(s)
+
+
+def _tokenize_field(text):
+    """
+    Tách một trường thành danh sách token, GIỮ NGUYÊN THỨ TỰ.
+
+    Chỉ sắp xếp lại các token MÀU với nhau (giữ nguyên vị trí các token khác).
+    Nhờ vậy 'GREEN/YELLOW' == 'YELLOW/GREEN' (cùng một loại dây tiếp địa)
+    nhưng 'R/2+W/3' vẫn KHÁC 'R/3+W/2'.
+    """
+    tokens = [
+        WORD_MAP.get(token, token)
+        for token in TOKEN_PATTERN.findall(text)
+    ]
+
+    color_positions = [
+        index for index, token in enumerate(tokens)
+        if token in PART4_COLOR_SET
+    ]
+
+    if len(color_positions) > 1:
+        for index, color in zip(
+            color_positions,
+            sorted(tokens[index] for index in color_positions),
+        ):
+            tokens[index] = color
+
+    return tokens
+
+
+def _extract_measures(text):
+    """
+    Bóc tách thông số kỹ thuật dạng NHÃN-GIÁ TRỊ, giữ nguyên ràng buộc.
+
+        'M12,L35' -> {'m': {'12'}, 'l': {'35'}}
+        'DC110V'  -> {'v': {'110'}, 'dc': ...}
+        '1Cx2.5'  -> {'c': {'1'}, 'x': {'2.5'}}
+
+    Nhờ giữ ràng buộc này, 'M10,L20' KHÁC 'M20,L10' - điều mà cách xử lý cũ
+    (cắt bỏ tiền tố L/W/H/D/T rồi so số trần) không phân biệt được.
+    """
+    measures = {}
+
+    for label, value in LABEL_BEFORE_VALUE.findall(text):
+        measures.setdefault(label, set()).add(value)
+
+    for value, label in VALUE_BEFORE_LABEL.findall(text):
+        measures.setdefault(label, set()).add(value)
+
+    return {label: frozenset(values) for label, values in measures.items()}
+
+
+@dataclass(frozen=True)
+class ItemSignature:
+    """Chữ ký có cấu trúc của một Description New."""
+
+    category: tuple = ()                                  # Tên/loại vật tư
+    fields: Counter = dc_field(default_factory=Counter)   # Bội tập các trường
+    field_source: tuple = ()                              # (chuẩn hóa -> nguyên văn)
+    colors: frozenset = frozenset()                       # Màu sắc
+    origins: frozenset = frozenset()                      # Nguồn gốc/xuất xứ
+    measures: tuple = ()                                  # Cặp (nhãn, giá trị)
+    model_codes: frozenset = frozenset()                  # Mã model/quy cách
+
+    @property
+    def is_empty(self):
+        return not self.fields
+
+    @property
+    def measure_map(self):
+        return dict(self.measures)
+
+    @property
+    def source_map(self):
+        return dict(self.field_source)
+
+    @property
+    def technical_text(self):
+        return ' | '.join(
+            f'{label.upper()}={"/".join(sorted(values))}'
+            for label, values in self.measures
+        )
+
+
+def build_signature(description):
+    """Bóc tách một Description New thành ItemSignature."""
+    if description is None or pd.isna(description):
+        return ItemSignature()
+
+    normalized = _normalize_raw_text(description)
+
+    # --- Các trường ngăn cách bởi dấu phẩy ---
+    # Giữ song song bản chuẩn hóa (để so khớp) và bản nguyên văn (để in ra
+    # báo cáo cho người đọc).
+    raw_parts = str(description).split(',')
+    normalized_parts = normalized.split(',')
+
+    field_token_lists = []
+    field_source = {}
+
+    for index, part in enumerate(normalized_parts):
+        tokens = _tokenize_field(part)
+
+        if not tokens:
+            continue
+
+        field_token_lists.append(tokens)
+
+        key = ' '.join(tokens)
+        raw_text = (
+            raw_parts[index].strip() if index < len(raw_parts) else key
+        )
+        field_source.setdefault(key, raw_text or key)
+
+    if not field_token_lists:
+        return ItemSignature()
+
+    # --- Màu & xuất xứ: bỏ nội dung trong ngoặc ---
+    # Ngoặc thường là chú giải viết tắt ('B-W-R-BK(Blue-White-Red-Black)');
+    # nếu tính vào sẽ báo lệch màu giả.
+    outside_tokens = _tokenize_field(
+        _normalize_raw_text(
+            PARENTHETICAL_PATTERN.sub(' ', str(description))
+        )
+    )
+
+    return ItemSignature(
+        category=tuple(field_token_lists[0]),
+        fields=Counter(' '.join(tokens) for tokens in field_token_lists),
+        field_source=tuple(sorted(field_source.items())),
+        colors=frozenset(t for t in outside_tokens if t in PART4_COLOR_SET),
+        origins=frozenset(t for t in outside_tokens if t in PART4_ORIGIN_SET),
+        measures=tuple(sorted(_extract_measures(normalized).items())),
+        model_codes=frozenset(
+            token
+            for token in MODEL_CODE_PATTERN.findall(normalized)
+            if DIGIT_PATTERN.search(token) and re.search(r'[a-z]', token)
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4.2. So khớp hai chữ ký
+# ---------------------------------------------------------------------------
+
+def _format_fields(field_counter, *source_maps):
+    """In các trường ra dạng NGUYÊN VĂN để người đọc báo cáo hiểu ngay."""
+    lookup = {}
+
+    for source_map in source_maps:
+        lookup.update(source_map)
+
+    return ' | '.join(
+        lookup.get(key, key) for key in sorted(field_counter.elements())
+    )
+
+
+def compare_signatures(signature_1, signature_2):
+    """
+    So khớp hai chữ ký theo từng THUỘC TÍNH.
+
+    Trả về (level, reason, missing_text):
+        level        : None nếu KHÔNG nghi trùng.
+        reason       : lý do kết luận (hoặc lý do loại trừ).
+        missing_text : phần dữ kiện mà bên ngắn còn thiếu (chỉ có ở Mức 2).
+
+    Thứ tự kiểm tra đi từ thuộc tính "đắt giá" nhất xuống, nên lý do trả về
+    luôn là nguyên nhân loại trừ đầu tiên - dễ giải thích cho nghiệp vụ.
+    """
+    if signature_1.is_empty or signature_2.is_empty:
+        return None, 'Thiếu mô tả', ''
+
+    # --- Lớp 1: Tên/loại vật tư ---
+    if signature_1.category != signature_2.category:
+        return None, (
+            f"Khác tên vật tư: '{' '.join(signature_1.category)}' "
+            f"vs '{' '.join(signature_2.category)}'"
+        ), ''
+
+    # --- Lớp 2: Màu sắc (chỉ loại khi CẢ HAI cùng có nhưng khác nhau) ---
+    if (
+        signature_1.colors and signature_2.colors
+        and signature_1.colors != signature_2.colors
+    ):
+        return None, (
+            f'Khác màu sắc: {sorted(signature_1.colors)} '
+            f'vs {sorted(signature_2.colors)}'
+        ), ''
+
+    # --- Lớp 3: Nguồn gốc / xuất xứ ---
+    if (
+        signature_1.origins and signature_2.origins
+        and signature_1.origins != signature_2.origins
+    ):
+        return None, (
+            f'Khác xuất xứ: {sorted(signature_1.origins)} '
+            f'vs {sorted(signature_2.origins)}'
+        ), ''
+
+    # --- Lớp 4: Thông số kỹ thuật theo cặp nhãn-giá trị ---
+    # Đây là lớp bảo vệ CHÍNH cho yêu cầu "khác thông số kỹ thuật thì không
+    # được tính là nghi trùng". Vì `measures` được bóc từ TOÀN BỘ mô tả, mọi
+    # mâu thuẫn nhãn-giá trị đều bị chặn tại đây, kể cả khi thông số đó nằm
+    # ở phần chênh lệch giữa hai bên.
+    map_1, map_2 = signature_1.measure_map, signature_2.measure_map
+
+    conflicts = sorted(
+        f'{label.upper()}={sorted(map_1[label])} vs {sorted(map_2[label])}'
+        for label in map_1.keys() & map_2.keys()
+        if map_1[label] != map_2[label]
+    )
+
+    if conflicts:
+        return None, 'Khác thông số kỹ thuật: ' + '; '.join(conflicts), ''
+
+    # --- Lớp 5: Mã model / quy cách ---
+    # Chỉ loại khi MỖI BÊN đều có model riêng (tức là hai model đối chọi
+    # nhau). Nếu chỉ một bên có model còn bên kia không ghi thì đó là
+    # "thiếu dữ kiện", để Lớp 7 xử lý.
+    only_in_1 = signature_1.model_codes - signature_2.model_codes
+    only_in_2 = signature_2.model_codes - signature_1.model_codes
+
+    if only_in_1 and only_in_2:
+        return None, (
+            f'Khác model/quy cách: {sorted(only_in_1)} vs {sorted(only_in_2)}'
+        ), ''
+
+    # --- Lớp 6: So khớp bội tập các trường mô tả ---
+    source_1, source_2 = signature_1.source_map, signature_2.source_map
+
+    extra_in_1 = signature_1.fields - signature_2.fields
+    extra_in_2 = signature_2.fields - signature_1.fields
+
+    if not extra_in_1 and not extra_in_2:
+        return LEVEL_EXACT, 'Mọi trường mô tả khớp tuyệt đối sau chuẩn hóa', ''
+
+    # Cả hai bên đều có trường riêng -> đây là MÂU THUẪN thông tin, không
+    # phải thiếu thông tin. Ví dụ 'Words: English' vs 'Words: English and
+    # Vietnamese' (nhãn song ngữ) hay 'M5' vs 'M4' (khác cỡ ren).
+    if extra_in_1 and extra_in_2:
+        return None, (
+            f'Khác nội dung mô tả: '
+            f'[{_format_fields(extra_in_1, source_1)}] '
+            f'vs [{_format_fields(extra_in_2, source_2)}]'
+        ), ''
+
+    # --- Lớp 7: KHỚP CHỨA NHAU (một bên là tập con của bên kia) ---
+    # Đến đây đã chắc chắn: cùng tên vật tư, cùng màu, cùng xuất xứ, KHÔNG
+    # có cặp nhãn-giá trị nào mâu thuẫn (Lớp 4) và không có model đối chọi
+    # (Lớp 5). Phần chênh lệch vì vậy là thông tin mà bên ngắn KHÔNG ĐỦ DỮ
+    # KIỆN để so sánh, chứ không phải thông số khác biệt.
+    #
+    # LƯU Ý QUAN TRỌNG: ở đây KHÔNG chặn theo "phần thừa có chứa số".
+    # Chặn như vậy sẽ loại oan các trường hợp đúng nghiệp vụ, ví dụ:
+    #     'BOLT,HEX BOLT,M6,L25,...'
+    #     'BOLT,HEX BOLT,P/W*2+S/W*1+NUT*1,M6,L25,...'
+    # Việc bảo vệ khỏi lệch thông số đã do Lớp 4 đảm nhiệm: nếu phần thừa
+    # chứa một nhãn kỹ thuật đã tồn tại với giá trị khác (M6 vs M8, L25 vs
+    # L30...) thì cặp đó đã bị loại từ trước khi tới đây.
+    missing_text = _format_fields(
+        extra_in_1 or extra_in_2, source_1, source_2
+    )
+
+    return (
+        LEVEL_SUBSET,
+        f'Mô tả ngắn nằm trọn trong mô tả dài; bên ngắn thiếu dữ kiện: '
+        f'[{missing_text}]',
+        missing_text,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4.3. Gom nhóm bắc cầu (Union-Find)
+# ---------------------------------------------------------------------------
+
+class UnionFind:
+    """Gom các mã nghi trùng thành nhóm theo quan hệ bắc cầu."""
+
+    def __init__(self):
+        self._parent = {}
+
+    def find(self, item):
+        self._parent.setdefault(item, item)
+
+        while self._parent[item] != item:
+            self._parent[item] = self._parent[self._parent[item]]
+            item = self._parent[item]
+
+        return item
+
+    def union(self, item_1, item_2):
+        root_1, root_2 = self.find(item_1), self.find(item_2)
+
+        if root_1 != root_2:
+            self._parent[root_2] = root_1
+
+    def groups(self):
+        result = {}
+
+        for item in self._parent:
+            result.setdefault(self.find(item), []).append(item)
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# 4.4. Chuẩn bị bảng Item New duy nhất
+# ---------------------------------------------------------------------------
 
 def join_unique_values(series):
-    """Gộp các giá trị duy nhất và bỏ giá trị rỗng."""
+    """Gộp các giá trị duy nhất, bỏ giá trị rỗng."""
     values = {
         str(value).strip()
         for value in series
@@ -337,637 +745,609 @@ def join_unique_values(series):
     return ' | '.join(sorted(values))
 
 
-def normalize_description_part4(description):
-    """Chuẩn hóa Description New riêng cho Phần 4."""
-    if description is None or pd.isna(description):
-        return ''
-
-    s = remove_diacritics(str(description).lower())
-
-    # Giữ cùng quy tắc chuẩn hóa với code hiện tại
-    s = re.sub(r'\bflame[\s-]+retardant\b', 'fr', s)
-    s = re.sub(r'\bh[\s-]*pvc\b', 'hpvc', s)
-    s = re.sub(r'\bcosmolink\s+vina\b', 'cosmolink', s)
-
-    # Bỏ CLASS 5
-    s = re.sub(
-        r'\bclass\s*[-:=]?\s*5(?:\.0)?\b',
-        ' ',
-        s
-    )
-
-    s = normalize_numbers(s)
-    s = re.sub(r'\s+', ' ', s).strip()
-
-    return s
-
-
-def make_description_key(description):
+def build_new_item_table(df):
     """
-    Khóa toàn bộ nội dung Description New.
+    Trích bảng quan hệ Item New <-> Code A <-> Ksys, bỏ mã rỗng/placeholder.
 
-    Không phụ thuộc thứ tự và không tính token lặp lại.
-    Thiếu hoặc khác một token sẽ tạo khóa khác.
+    Mã placeholder (toàn số 0, ví dụ '00000000000') nghĩa là 'chưa cấp mã
+    mới' - nếu để lại sẽ gom nhầm hàng trăm vật tư khác nhau vào một nhóm.
     """
-    tokens = tokenize_and_clean(
-        description,
-        remove_class5=True
-    )
-
-    if not tokens:
-        return ''
-
-    return '|'.join(sorted(set(tokens)))
-
-
-def make_technical_key(description):
-    """
-    Khóa thông số kỹ thuật có giữ quan hệ chữ và số.
-
-    Ví dụ:
-    - M12 khác M10.
-    - L110 khác L30.
-    - M12,L30 khác M30,L12.
-    - 100VA khác 200VA.
-    """
-    s = normalize_description_part4(description)
-
-    if not s:
-        return ''
-
-    raw_tokens = re.findall(
-        r'[a-z0-9]+(?:\.[a-z0-9]+)*',
-        s
-    )
-
-    technical_tokens = {
-        token.strip('.')
-        for token in raw_tokens
-        if re.search(r'\d', token)
-    }
-
-    return '|'.join(sorted(technical_tokens))
-
-
-def make_category_key(description):
-    """Lấy tên/loại vật tư ở phần đầu trước dấu phẩy."""
-    if description is None or pd.isna(description):
-        return ''
-
-    first_part = str(description).split(',', 1)[0]
-
-    tokens = tokenize_and_clean(
-        first_part,
-        remove_class5=True
-    )
-
-    return '|'.join(tokens)
-
-
-def make_color_key(description):
-    """Lấy toàn bộ màu sắc, kể cả màu nằm một phía."""
-    strict_color_set = set(COLOR_SET) | {
-        'violet',
-        'pink',
-        'greenyellow'
-    }
-
-    tokens = tokenize_no_parenthetical(
-        description,
-        remove_class5=True
-    )
-
-    colors = {
-        token
-        for token in tokens
-        if token in strict_color_set
-    }
-
-    return '|'.join(sorted(colors))
-
-
-def make_origin_key(description):
-    """Lấy toàn bộ thông tin xuất xứ."""
-    tokens = tokenize_no_parenthetical(
-        description,
-        remove_class5=True
-    )
-
-    origins = {
-        token
-        for token in tokens
-        if token in ORIGIN_SET
-    }
-
-    return '|'.join(sorted(origins))
-
-
-# =============================================================
-# 4.2. CHUẨN BỊ DỮ LIỆU
-# =============================================================
-
-df_new_check = df[
-    [
-        'item new',
-        'Description new',
-        'item code A',
-        'Description code A',
-        'item ksys'
-    ]
-].copy()
-
-# Làm sạch các cột mã
-for col in ['item new', 'item code A', 'item ksys']:
-    df_new_check[col] = (
-        df_new_check[col]
-        .fillna('')
-        .astype(str)
-        .str.strip()
-    )
-
-# Loại Item New và Description New rỗng
-df_new_check = df_new_check[
-    df_new_check['item new'].ne('')
-    & df_new_check['Description new'].notna()
-    & df_new_check[
-        'Description new'
-    ].astype(str).str.strip().ne('')
-].copy()
-
-# Loại các dòng trùng hoàn toàn
-df_new_check = (
-    df_new_check
-    .drop_duplicates(keep='first')
-    .reset_index(drop=True)
-)
-
-
-# =============================================================
-# 4.3. TỔNG HỢP THEO ITEM NEW VÀ DESCRIPTION NEW
-# =============================================================
-
-df_new_unique = (
-    df_new_check
-    .groupby(
-        ['item new', 'Description new'],
-        as_index=False
-    )
-    .agg({
-        'item code A': join_unique_values,
-        'Description code A': join_unique_values,
-        'item ksys': join_unique_values
-    })
-)
-
-df_new_unique['Description key'] = (
-    df_new_unique['Description new']
-    .apply(make_description_key)
-)
-
-df_new_unique['Technical key'] = (
-    df_new_unique['Description new']
-    .apply(make_technical_key)
-)
-
-df_new_unique['Category key'] = (
-    df_new_unique['Description new']
-    .apply(make_category_key)
-)
-
-df_new_unique['Color key'] = (
-    df_new_unique['Description new']
-    .apply(make_color_key)
-)
-
-df_new_unique['Origin key'] = (
-    df_new_unique['Description new']
-    .apply(make_origin_key)
-)
-
-# Khóa tổng hợp nghiêm ngặt
-df_new_unique['Duplicate key'] = (
-    df_new_unique['Category key']
-    + '||'
-    + df_new_unique['Description key']
-    + '||'
-    + df_new_unique['Technical key']
-    + '||'
-    + df_new_unique['Color key']
-    + '||'
-    + df_new_unique['Origin key']
-)
-
-df_new_unique = df_new_unique[
-    df_new_unique['Description key'].ne('')
-].copy()
-
-
-# =============================================================
-# 4.4. TÌM NHIỀU ITEM NEW CÓ CÙNG DESCRIPTION NEW
-# =============================================================
-
-item_count_by_key = (
-    df_new_unique
-    .groupby('Duplicate key')['item new']
-    .nunique()
-)
-
-duplicate_keys = item_count_by_key[
-    item_count_by_key > 1
-].index.tolist()
-
-STRICT_DUPLICATE_STATUSES = {
-    'Khớp tuyệt đối',
-    'Khớp chứa nhau'
-}
-
-pair_records = []
-confirmed_keys = set()
-
-
-# =============================================================
-# 4.5. XÁC NHẬN BẰNG SMART_SPECS_MATCHING
-# =============================================================
-
-for duplicate_key in duplicate_keys:
-
-    group = df_new_unique[
-        df_new_unique['Duplicate key'] == duplicate_key
+    columns = [
+        'item new', 'Description new',
+        'item code A', 'Description code A', 'item ksys',
     ]
 
-    rows = group.to_dict('records')
+    table = df[columns].copy()
 
-    for i in range(len(rows)):
-        row_1 = rows[i]
+    for column in ['item new', 'item code A', 'item ksys']:
+        table[column] = table[column].fillna('').astype(str).str.strip()
 
-        for j in range(i + 1, len(rows)):
-            row_2 = rows[j]
-
-            if row_1['item new'] == row_2['item new']:
-                continue
-
-            desc_1 = row_1['Description new']
-            desc_2 = row_2['Description new']
-
-            status, detail = smart_specs_matching(
-                desc_1,
-                desc_2,
-                ignore_class5=True
-            )
-
-            # Kiểm tra nghiêm ngặt lần cuối
-            same_description = (
-                row_1['Description key']
-                == row_2['Description key']
-            )
-
-            same_technical_specs = (
-                row_1['Technical key']
-                == row_2['Technical key']
-            )
-
-            same_category = (
-                row_1['Category key']
-                == row_2['Category key']
-            )
-
-            same_color = (
-                row_1['Color key']
-                == row_2['Color key']
-            )
-
-            same_origin = (
-                row_1['Origin key']
-                == row_2['Origin key']
-            )
-
-            is_duplicate = (
-                same_description
-                and same_technical_specs
-                and same_category
-                and same_color
-                and same_origin
-                and status in STRICT_DUPLICATE_STATUSES
-            )
-
-            if not is_duplicate:
-                continue
-
-            confirmed_keys.add(duplicate_key)
-
-            pair_records.append({
-                'Duplicate key': duplicate_key,
-
-                'item new 1': row_1['item new'],
-                'Description new 1': desc_1,
-                'item code A 1': row_1['item code A'],
-                'Description code A 1':
-                    row_1['Description code A'],
-                'item ksys 1': row_1['item ksys'],
-
-                'item new 2': row_2['item new'],
-                'Description new 2': desc_2,
-                'item code A 2': row_2['item code A'],
-                'Description code A 2':
-                    row_2['Description code A'],
-                'item ksys 2': row_2['item ksys'],
-
-                'Thông số kỹ thuật':
-                    row_1['Technical key'],
-                'Màu sắc':
-                    row_1['Color key'],
-                'Xuất xứ':
-                    row_1['Origin key'],
-
-                'Trạng thái': status,
-                'Chi tiết': detail
-            })
-
-
-# =============================================================
-# 4.6. TẠO BẢNG NHÓM ITEM NEW TRÙNG DESCRIPTION
-# =============================================================
-
-group_ids = {
-    key: number
-    for number, key in enumerate(
-        sorted(confirmed_keys),
-        start=1
+    is_real_code = (
+        table['item new'].ne('')
+        & ~table['item new'].str.fullmatch(r'0+')
     )
-}
-
-df_duplicate_groups = df_new_unique[
-    df_new_unique['Duplicate key'].isin(confirmed_keys)
-].copy()
-
-if not df_duplicate_groups.empty:
-
-    df_duplicate_groups['Nhóm trùng số'] = (
-        df_duplicate_groups['Duplicate key']
-        .map(group_ids)
+    has_description = (
+        table['Description new'].notna()
+        & table['Description new'].astype(str).str.strip().ne('')
     )
 
-    df_duplicate_groups = df_duplicate_groups[
-        [
-            'Nhóm trùng số',
-            'item new',
-            'Description new',
-            'item code A',
-            'Description code A',
-            'item ksys',
-            'Technical key',
-            'Color key',
-            'Origin key'
-        ]
-    ].rename(
-        columns={
-            'Technical key': 'Thông số kỹ thuật',
-            'Color key': 'Màu sắc',
-            'Origin key': 'Xuất xứ'
-        }
-    ).sort_values(
-        ['Nhóm trùng số', 'item new']
-    ).reset_index(drop=True)
-
-else:
-    df_duplicate_groups = pd.DataFrame(
-        columns=[
-            'Nhóm trùng số',
-            'item new',
-            'Description new',
-            'item code A',
-            'Description code A',
-            'item ksys',
-            'Thông số kỹ thuật',
-            'Màu sắc',
-            'Xuất xứ'
-        ]
+    return (
+        table[is_real_code & has_description]
+        .drop_duplicates(keep='first')
+        .reset_index(drop=True)
     )
 
 
-# =============================================================
-# 4.7. TẠO BẢNG CHI TIẾT CÁC CẶP TRÙNG
-# =============================================================
+def aggregate_by_new_item(new_item_table):
+    """Gộp về mức (item new, Description new) và gắn chữ ký cấu trúc."""
+    aggregated = (
+        new_item_table
+        .groupby(['item new', 'Description new'], as_index=False)
+        .agg({
+            'item code A': join_unique_values,
+            'Description code A': join_unique_values,
+            'item ksys': join_unique_values,
+        })
+    )
 
-for record in pair_records:
-    record['Nhóm trùng số'] = group_ids[
-        record['Duplicate key']
-    ]
+    aggregated['signature'] = aggregated['Description new'].map(build_signature)
 
-    del record['Duplicate key']
+    aggregated = aggregated[
+        aggregated['signature'].map(lambda s: not s.is_empty)
+    ].reset_index(drop=True)
+
+    aggregated['Thông số kỹ thuật'] = aggregated['signature'].map(
+        lambda s: s.technical_text
+    )
+    aggregated['Màu sắc'] = aggregated['signature'].map(
+        lambda s: '|'.join(sorted(s.colors))
+    )
+    aggregated['Xuất xứ'] = aggregated['signature'].map(
+        lambda s: '|'.join(sorted(s.origins))
+    )
+    aggregated['Category key'] = aggregated['signature'].map(
+        lambda s: ' '.join(s.category)
+    )
+
+    return aggregated
 
 
-pair_columns = [
+# ---------------------------------------------------------------------------
+# 4.5. BÀI TOÁN 4A - Item New nghi trùng Description New
+# ---------------------------------------------------------------------------
+
+PAIR_COLUMNS = [
     'Nhóm trùng số',
-
-    'item new 1',
-    'Description new 1',
-    'item code A 1',
-    'Description code A 1',
-    'item ksys 1',
-
-    'item new 2',
-    'Description new 2',
-    'item code A 2',
-    'Description code A 2',
-    'item ksys 2',
-
-    'Thông số kỹ thuật',
-    'Màu sắc',
-    'Xuất xứ',
-    'Trạng thái',
-    'Chi tiết'
+    'item new 1', 'Description new 1',
+    'item code A 1', 'Description code A 1', 'item ksys 1',
+    'item new 2', 'Description new 2',
+    'item code A 2', 'Description code A 2', 'item ksys 2',
+    'Thông số kỹ thuật', 'Màu sắc', 'Xuất xứ',
+    'Trạng thái', 'Chi tiết', 'Mã có mô tả đầy đủ hơn', 'Dữ kiện còn thiếu',
 ]
 
-df_duplicate_pairs = (
-    pd.DataFrame(
-        pair_records,
-        columns=pair_columns
-    )
-    .drop_duplicates(keep='first')
-    .reset_index(drop=True)
-)
-
-if not df_duplicate_pairs.empty:
-    df_duplicate_pairs = df_duplicate_pairs.sort_values(
-        [
-            'Nhóm trùng số',
-            'item new 1',
-            'item new 2'
-        ]
-    ).reset_index(drop=True)
+GROUP_COLUMNS = [
+    'Nhóm trùng số', 'item new', 'Description new',
+    'item code A', 'Description code A', 'item ksys',
+    'Thông số kỹ thuật', 'Màu sắc', 'Xuất xứ',
+]
 
 
-# =============================================================
-# 4.8. TÌM ITEM NEW CÓ NHIỀU ITEM CODE A KHÁC NHAU
-# =============================================================
+def find_duplicate_pairs(aggregated):
+    """
+    Sinh danh sách cặp nghi trùng.
 
-df_new_code_a_relation = (
-    df_new_check[
-        df_new_check['item code A'].ne('')
-    ]
-    .drop_duplicates(
-        subset=['item new', 'item code A'],
-        keep='first'
-    )
-)
+    Chặn (blocking) theo 'Category key' để chỉ so các vật tư CÙNG LOẠI -
+    vừa đúng nghiệp vụ (khác tên vật tư thì không thể trùng) vừa giảm mạnh
+    số phép so sánh.
+    """
+    pairs = []
 
-code_a_count_by_item_new = (
-    df_new_code_a_relation
-    .groupby('item new')['item code A']
-    .nunique()
-)
+    for _, block in aggregated.groupby('Category key', sort=False):
+        if len(block) < 2:
+            continue
 
-multiple_code_a_items = code_a_count_by_item_new[
-    code_a_count_by_item_new > 1
-].index.tolist()
+        rows = block.to_dict('records')
+
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                row_1, row_2 = rows[i], rows[j]
+
+                if row_1['item new'] == row_2['item new']:
+                    continue
+
+                level, reason, missing_text = compare_signatures(
+                    row_1['signature'], row_2['signature']
+                )
+
+                if level is None:
+                    continue
+
+                # Chuẩn hóa thứ tự cặp để kết quả ổn định giữa các lần chạy
+                first, second = sorted(
+                    (row_1, row_2), key=lambda r: r['item new']
+                )
+
+                # Mã nào có mô tả đầy đủ hơn -> mã còn lại là mã thiếu dữ kiện
+                fuller = max(
+                    (row_1, row_2),
+                    key=lambda r: sum(r['signature'].fields.values()),
+                )
+
+                pairs.append({
+                    'level': level,
+                    'reason': reason,
+                    'missing': missing_text,
+                    'fuller': fuller['item new'] if missing_text else '',
+                    'first': first,
+                    'second': second,
+                })
+
+    return pairs
 
 
-# Chi tiết Item New có nhiều Item Code A
-df_multiple_code_a_detail = (
-    df_new_check[
-        df_new_check['item new'].isin(
-            multiple_code_a_items
+def build_duplicate_reports(pairs, level):
+    """Dựng cặp bảng (nhóm, chi tiết cặp) cho một mức nghi trùng."""
+    selected = [pair for pair in pairs if pair['level'] == level]
+
+    if not selected:
+        return (
+            pd.DataFrame(columns=GROUP_COLUMNS),
+            pd.DataFrame(columns=PAIR_COLUMNS),
         )
-        & df_new_check['item code A'].ne('')
-    ]
-    .drop_duplicates(keep='first')
-    [
-        [
-            'item new',
-            'Description new',
-            'item code A',
-            'Description code A',
-            'item ksys'
-        ]
-    ]
-    .sort_values(
-        ['item new', 'item code A']
+
+    # --- Gom nhóm bắc cầu ---
+    union_find = UnionFind()
+
+    for pair in selected:
+        union_find.union(pair['first']['item new'], pair['second']['item new'])
+
+    group_id_by_item = {}
+
+    for number, (_, members) in enumerate(
+        sorted(union_find.groups().items(), key=lambda kv: min(kv[1])),
+        start=1,
+    ):
+        for member in members:
+            group_id_by_item[member] = number
+
+    # --- Bảng chi tiết cặp ---
+    pair_records = []
+
+    for pair in selected:
+        first, second = pair['first'], pair['second']
+
+        pair_records.append({
+            'Nhóm trùng số': group_id_by_item[first['item new']],
+
+            'item new 1': first['item new'],
+            'Description new 1': first['Description new'],
+            'item code A 1': first['item code A'],
+            'Description code A 1': first['Description code A'],
+            'item ksys 1': first['item ksys'],
+
+            'item new 2': second['item new'],
+            'Description new 2': second['Description new'],
+            'item code A 2': second['item code A'],
+            'Description code A 2': second['Description code A'],
+            'item ksys 2': second['item ksys'],
+
+            'Thông số kỹ thuật': first['Thông số kỹ thuật'],
+            'Màu sắc': first['Màu sắc'],
+            'Xuất xứ': first['Xuất xứ'],
+
+            'Trạng thái': pair['level'],
+            'Chi tiết': pair['reason'],
+            'Mã có mô tả đầy đủ hơn': pair['fuller'],
+            'Dữ kiện còn thiếu': pair['missing'],
+        })
+
+    df_pairs = (
+        pd.DataFrame(pair_records, columns=PAIR_COLUMNS)
+        .drop_duplicates(keep='first')
+        .sort_values(['Nhóm trùng số', 'item new 1', 'item new 2'])
+        .reset_index(drop=True)
     )
-    .reset_index(drop=True)
-)
+
+    # --- Bảng nhóm ---
+    member_rows = {}
+
+    for pair in selected:
+        for side in ('first', 'second'):
+            row = pair[side]
+            member_rows[row['item new']] = row
+
+    df_groups = pd.DataFrame([
+        {
+            'Nhóm trùng số': group_id_by_item[item_new],
+            'item new': item_new,
+            'Description new': row['Description new'],
+            'item code A': row['item code A'],
+            'Description code A': row['Description code A'],
+            'item ksys': row['item ksys'],
+            'Thông số kỹ thuật': row['Thông số kỹ thuật'],
+            'Màu sắc': row['Màu sắc'],
+            'Xuất xứ': row['Xuất xứ'],
+        }
+        for item_new, row in member_rows.items()
+    ], columns=GROUP_COLUMNS)
+
+    df_groups = (
+        df_groups
+        .sort_values(['Nhóm trùng số', 'item new'])
+        .reset_index(drop=True)
+    )
+
+    return df_groups, df_pairs
 
 
-# Tổng hợp Item New có nhiều Item Code A
-if not df_multiple_code_a_detail.empty:
+# ---------------------------------------------------------------------------
+# 4.6. BÀI TOÁN 4B - Item New gắn nhiều Item Code A
+# ---------------------------------------------------------------------------
 
-    df_multiple_code_a_summary = (
-        df_multiple_code_a_detail
+MULTI_CODE_A_SUMMARY_COLUMNS = [
+    'item new',
+    'Số lượng Item Code A',
+    'Danh sách Item Code A',
+    'Danh sách Description New',
+    'Danh sách Item Ksys',
+]
+
+CODE_A_VERDICT_COLUMNS = [
+    'item new', 'Description new',
+    'item code A 1', 'Description code A 1',
+    'item code A 2', 'Description code A 2',
+    'Kết luận', 'Chi tiết', 'Dữ kiện còn thiếu',
+]
+
+
+def find_items_with_multiple_code_a(new_item_table):
+    """Tìm Item New được gắn với nhiều hơn một Item Code A."""
+    relation = new_item_table[new_item_table['item code A'].ne('')]
+
+    code_a_count = (
+        relation
+        .drop_duplicates(subset=['item new', 'item code A'], keep='first')
+        .groupby('item new')['item code A']
+        .nunique()
+    )
+
+    flagged_items = code_a_count[code_a_count > 1].index
+
+    df_detail = (
+        relation[relation['item new'].isin(flagged_items)]
+        .drop_duplicates(keep='first')
+        [[
+            'item new', 'Description new',
+            'item code A', 'Description code A', 'item ksys',
+        ]]
+        .sort_values(['item new', 'item code A'])
+        .reset_index(drop=True)
+    )
+
+    if df_detail.empty:
+        return (
+            pd.DataFrame(columns=MULTI_CODE_A_SUMMARY_COLUMNS),
+            df_detail,
+        )
+
+    df_summary = (
+        df_detail
         .groupby('item new', as_index=False)
-        .agg(
-            so_luong_code_a=(
-                'item code A',
-                'nunique'
-            ),
-            danh_sach_code_a=(
-                'item code A',
-                join_unique_values
-            ),
-            danh_sach_description_new=(
-                'Description new',
-                join_unique_values
-            ),
-            danh_sach_item_ksys=(
-                'item ksys',
-                join_unique_values
-            )
-        )
-        .rename(
-            columns={
-                'so_luong_code_a':
-                    'Số lượng Item Code A',
-                'danh_sach_code_a':
-                    'Danh sách Item Code A',
-                'danh_sach_description_new':
-                    'Danh sách Description New',
-                'danh_sach_item_ksys':
-                    'Danh sách Item Ksys'
-            }
-        )
+        .agg(**{
+            'Số lượng Item Code A': ('item code A', 'nunique'),
+            'Danh sách Item Code A': ('item code A', join_unique_values),
+            'Danh sách Description New': ('Description new', join_unique_values),
+            'Danh sách Item Ksys': ('item ksys', join_unique_values),
+        })
         .sort_values(
-            ['Số lượng Item Code A', 'item new'],
-            ascending=[False, True]
+            ['Số lượng Item Code A', 'item new'], ascending=[False, True]
         )
         .reset_index(drop=True)
     )
 
-else:
-    df_multiple_code_a_summary = pd.DataFrame(
-        columns=[
-            'item new',
-            'Số lượng Item Code A',
-            'Danh sách Item Code A',
-            'Danh sách Description New',
-            'Danh sách Item Ksys'
+    return df_summary, df_detail
+
+
+def judge_code_a_within_new_item(df_multi_code_a_detail):
+    """
+    Với mỗi Item New gắn nhiều Item Code A: so chính các mô tả Code A đó
+    với nhau bằng đúng engine của 4A.
+
+    Ý nghĩa nghiệp vụ - trả lời câu hỏi "gộp mã như vậy có đúng không?":
+      * Nếu các Code A khớp tuyệt đối / khớp chứa nhau -> hệ Code A cũ vốn
+        đã tạo trùng, việc gộp về một mã New là ĐÚNG.
+      * Nếu các Code A khác thông số/màu/xuất xứ -> đây là LỖI ÁNH XẠ:
+        nhiều vật tư khác nhau bị gán nhầm chung một mã New.
+    """
+    records = []
+
+    for item_new, block in df_multi_code_a_detail.groupby('item new'):
+        rows = (
+            block
+            .drop_duplicates(subset=['item code A'], keep='first')
+            .to_dict('records')
+        )
+
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                first, second = sorted(
+                    (rows[i], rows[j]), key=lambda r: r['item code A']
+                )
+
+                level, reason, missing_text = compare_signatures(
+                    build_signature(first['Description code A']),
+                    build_signature(second['Description code A']),
+                )
+
+                records.append({
+                    'item new': item_new,
+                    'Description new': first['Description new'],
+                    'item code A 1': first['item code A'],
+                    'Description code A 1': first['Description code A'],
+                    'item code A 2': second['item code A'],
+                    'Description code A 2': second['Description code A'],
+                    'Kết luận': (
+                        f'Gộp hợp lý ({level})' if level
+                        else 'LỖI ÁNH XẠ - Code A không trùng nhau'
+                    ),
+                    'Chi tiết': reason,
+                    'Dữ kiện còn thiếu': missing_text,
+                })
+
+    return (
+        pd.DataFrame(records, columns=CODE_A_VERDICT_COLUMNS)
+        .sort_values(['Kết luận', 'item new', 'item code A 1'])
+        .reset_index(drop=True)
+    )
+
+
+# =============================================================================
+# PHẦN 5: CẢNH BÁO CHẤT LƯỢNG DỮ LIỆU
+# =============================================================================
+# Các trường hợp trước đây bị loại âm thầm hoặc chưa được kiểm tra.
+# Tách riêng nên KHÔNG ảnh hưởng kết quả Phần 1-4.
+
+def build_data_quality_report(df_full, df_dropped, new_item_table):
+    """Tổng hợp các cảnh báo dữ liệu thành một bảng phẳng, dễ lọc."""
+    records = []
+
+    def add(loai, ma, mo_ta):
+        records.append({'Loại cảnh báo': loai, 'Mã': ma, 'Chi tiết': mo_ta})
+
+    # (1) Dòng bị loại vì thiếu Description New -> KHÔNG được kiểm tra
+    for _, row in df_dropped.iterrows():
+        add(
+            'Thiếu Description New (không kiểm tra được)',
+            str(row['item code A']),
+            f"Code A: {row['Description code A']} | item new: {row['item new']}",
+        )
+
+    # (2) Mã New placeholder (toàn số 0) = chưa cấp mã
+    placeholder = df_full[df_full['item new'].str.fullmatch(r'0+', na=False)]
+
+    for _, row in placeholder.iterrows():
+        add(
+            'Item New là mã placeholder (toàn số 0)',
+            str(row['item code A']),
+            f"item new = '{row['item new']}' | {row['Description code A']}",
+        )
+
+    # (3) Một Item New nhưng có nhiều Description New khác nhau
+    desc_count = new_item_table.groupby('item new')['Description new'].nunique()
+
+    for item_new in desc_count[desc_count > 1].index:
+        descriptions = new_item_table.loc[
+            new_item_table['item new'] == item_new, 'Description new'
         ]
+        add(
+            'Item New có nhiều Description New khác nhau',
+            item_new,
+            join_unique_values(descriptions),
+        )
+
+    # (4) Một Item Code A ánh xạ sang nhiều Item New (dấu hiệu tách mã sai)
+    code_a_map = (
+        new_item_table[new_item_table['item code A'].ne('')]
+        .groupby('item code A')['item new']
+        .nunique()
+    )
+
+    for code_a in code_a_map[code_a_map > 1].index:
+        items = new_item_table.loc[
+            new_item_table['item code A'] == code_a, 'item new'
+        ]
+        add(
+            'Một Item Code A ánh xạ nhiều Item New',
+            code_a,
+            join_unique_values(items),
+        )
+
+    # (5) Một Item New ứng với nhiều Item Ksys
+    ksys_map = (
+        new_item_table[new_item_table['item ksys'].ne('')]
+        .groupby('item new')['item ksys']
+        .nunique()
+    )
+
+    for item_new in ksys_map[ksys_map > 1].index:
+        ksys_values = new_item_table.loc[
+            new_item_table['item new'] == item_new, 'item ksys'
+        ]
+        add(
+            'Item New ứng với nhiều Item Ksys',
+            item_new,
+            join_unique_values(ksys_values),
+        )
+
+    return pd.DataFrame(
+        records, columns=['Loại cảnh báo', 'Mã', 'Chi tiết']
     )
 
 
-# =============================================================
-# 4.9. GHI KẾT QUẢ VÀO FILE EXCEL
-# =============================================================
+UOM_CONFLICT_COLUMNS = ['Mức nghi trùng', 'Nhóm trùng số', 'item new', 'UOM new']
 
-with pd.ExcelWriter(
-    output_filename,
-    engine='openpyxl',
-    mode='a',
-    if_sheet_exists='replace'
-) as writer:
 
-    df_duplicate_groups.to_excel(
-        writer,
-        sheet_name='Item New trùng Description',
-        index=False
+def check_uom_conflict_in_groups(group_frames_by_level, df_full):
+    """
+    Trong mỗi nhóm nghi trùng, kiểm tra các Item New có cùng UOM hay không.
+
+    Cùng mô tả nhưng khác đơn vị tính thường là khác quy cách đóng gói,
+    cần người review xác nhận trước khi gộp mã.
+
+    `group_frames_by_level`: dict {tên mức: DataFrame nhóm}. Số nhóm được
+    đánh lại độc lập ở từng mức nên phải gộp kèm nhãn mức, tránh trộn nhầm
+    'Nhóm 1 - Mức 1' với 'Nhóm 1 - Mức 2'.
+    """
+    frames = []
+
+    for level, df_groups in group_frames_by_level.items():
+        if df_groups.empty:
+            continue
+
+        frame = df_groups[['Nhóm trùng số', 'item new']].copy()
+        frame.insert(0, 'Mức nghi trùng', level)
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=UOM_CONFLICT_COLUMNS)
+
+    merged = pd.concat(frames, ignore_index=True)
+
+    uom_by_item = (
+        df_full[df_full['item new'].ne('')]
+        .groupby('item new')['uom new']
+        .apply(join_unique_values)
     )
 
-    df_duplicate_pairs.to_excel(
-        writer,
-        sheet_name='Chi tiết Item New trùng',
-        index=False
+    merged['UOM new'] = merged['item new'].map(uom_by_item).fillna('')
+
+    conflict = (
+        merged
+        .groupby(['Mức nghi trùng', 'Nhóm trùng số'], sort=False)
+        .filter(lambda block: block['UOM new'].nunique() > 1)
     )
 
-    df_multiple_code_a_summary.to_excel(
-        writer,
-        sheet_name='Item New nhiều Code A',
-        index=False
-    )
-
-    df_multiple_code_a_detail.to_excel(
-        writer,
-        sheet_name='Chi tiết New nhiều Code A',
-        index=False
+    return (
+        conflict[UOM_CONFLICT_COLUMNS]
+        .sort_values(['Mức nghi trùng', 'Nhóm trùng số', 'item new'])
+        .reset_index(drop=True)
     )
 
 
-# =============================================================
-# 4.10. THỐNG KÊ
-# =============================================================
+# =============================================================================
+# ĐIỀU PHỐI & XUẤT BÁO CÁO
+# =============================================================================
 
-n_duplicate_groups = (
-    df_duplicate_groups['Nhóm trùng số'].nunique()
-    if not df_duplicate_groups.empty
-    else 0
-)
+def main():
+    # ---- Đọc & làm sạch ----
+    df_full = load_dataset()
+    df, df_dropped = drop_invalid_description_new(df_full)
 
-n_duplicate_items = (
-    df_duplicate_groups['item new'].nunique()
-    if not df_duplicate_groups.empty
-    else 0
-)
+    # ---- Phần 1 & 2 ----
+    df = compare_uom(df)
+    df = run_matching(
+        df, 'Description code A', 'Description ksys',
+        'Code A vs Ksys', ignore_class5=False,
+    )
+    df = run_matching(
+        df, 'Description code A', 'Description new',
+        'Code A vs New', ignore_class5=True,
+    )
 
-n_multiple_code_a = len(multiple_code_a_items)
+    # ---- Phần 3: lọc danh sách lệch ----
+    df_uom_diff_ksys = df[~df['uom_ksys_match']].copy()
+    df_uom_diff_new = df[~df['uom_new_match']].copy()
 
-print(
-    f"    + Item New trùng Description: "
-    f"{n_duplicate_groups} nhóm / {n_duplicate_items} mã"
-)
+    df_desc_diff_ksys = df[
+        ~df['Trạng thái Desc (Code A vs Ksys)'].isin(MATCH_STATUSES)
+    ].copy()
 
-print(
-    f"    + Cặp Item New trùng Description: "
-    f"{len(df_duplicate_pairs)} cặp"
-)
+    df_desc_diff_new = (
+        df[~df['Trạng thái Desc (Code A vs New)'].isin(MATCH_STATUSES)]
+        .drop_duplicates(keep='first')
+        .reset_index(drop=True)
+    )
 
-print(
-    f"    + Item New có nhiều Item Code A: "
-    f"{n_multiple_code_a} mã"
-)
+    # ---- Phần 4 ----
+    new_item_table = build_new_item_table(df)
+    aggregated = aggregate_by_new_item(new_item_table)
+
+    pairs = find_duplicate_pairs(aggregated)
+
+    df_exact_groups, df_exact_pairs = build_duplicate_reports(pairs, LEVEL_EXACT)
+    df_subset_groups, df_subset_pairs = build_duplicate_reports(pairs, LEVEL_SUBSET)
+
+    df_multi_code_a_summary, df_multi_code_a_detail = (
+        find_items_with_multiple_code_a(new_item_table)
+    )
+    df_code_a_verdict = judge_code_a_within_new_item(df_multi_code_a_detail)
+
+    # ---- Phần 5 ----
+    df_data_quality = build_data_quality_report(
+        df_full, df_dropped, new_item_table
+    )
+    df_uom_conflict = check_uom_conflict_in_groups(
+        {
+            LEVEL_EXACT: df_exact_groups,
+            LEVEL_SUBSET: df_subset_groups,
+        },
+        df,
+    )
+
+    # ---- Xuất Excel ----
+    sheets = {
+        'Lệch Desc (Code A vs Ksys)': df_desc_diff_ksys,
+        'Lệch Desc (Code A vs New)': df_desc_diff_new,
+        'Lệch UOM (Code A vs Ksys)': df_uom_diff_ksys,
+        'Lệch UOM (Code A vs New)': df_uom_diff_new,
+        'Toàn bộ Data Checked': df,
+
+        'Item New trùng Description': df_exact_groups,
+        'Chi tiết Item New trùng': df_exact_pairs,
+        'Nghi trùng khớp chứa nhau': df_subset_groups,
+        'Chi tiết khớp chứa nhau': df_subset_pairs,
+
+        'Item New nhiều Code A': df_multi_code_a_summary,
+        'Chi tiết New nhiều Code A': df_multi_code_a_detail,
+        'Đối chiếu Code A trong 1 New': df_code_a_verdict,
+
+        'Cảnh báo dữ liệu': df_data_quality,
+        'Cảnh báo lệch UOM nhóm trùng': df_uom_conflict,
+    }
+
+    with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
+        for sheet_name, frame in sheets.items():
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    # ---- Thống kê ----
+    print(f"--> Xuất thành công file gộp: '{OUTPUT_FILE}'")
+    print(f"    + Lệch UOM  : Ksys ({len(df_uom_diff_ksys)}) "
+          f"| New ({len(df_uom_diff_new)})")
+    print(f"    + Lệch Desc : Ksys ({len(df_desc_diff_ksys)}) "
+          f"| New ({len(df_desc_diff_new)})")
+    print(f"    + [4A] Khớp tuyệt đối  : "
+          f"{df_exact_groups['Nhóm trùng số'].nunique()} nhóm / "
+          f"{df_exact_groups['item new'].nunique()} mã / "
+          f"{len(df_exact_pairs)} cặp")
+    print(f"    + [4A] Khớp chứa nhau  : "
+          f"{df_subset_groups['Nhóm trùng số'].nunique()} nhóm / "
+          f"{df_subset_groups['item new'].nunique()} mã / "
+          f"{len(df_subset_pairs)} cặp")
+    print(f"    + [4B] Item New nhiều Code A: "
+          f"{len(df_multi_code_a_summary)} mã / "
+          f"{len(df_code_a_verdict)} cặp Code A đối chiếu")
+
+    if not df_code_a_verdict.empty:
+        for verdict, count in (
+            df_code_a_verdict['Kết luận'].value_counts().items()
+        ):
+            print(f"           - {verdict}: {count} cặp")
+
+    print(f"    + [5]  Cảnh báo dữ liệu     : {len(df_data_quality)} dòng")
+
+    return locals()
+
+
+if __name__ == '__main__':
+    main()
