@@ -7,18 +7,7 @@
  Phần 2 : So sánh Description (dùng chung engine chữ ký của Phần 4)
  Phần 3 : Xuất báo cáo lệch UOM / Description
  Phần 4 : Kiểm tra trùng lặp trong hệ mã New
- Phần 5 : Cảnh báo chất lượng dữ liệu
-
- Nguyên tắc phân loại (áp dụng cho cả Phần 2 và Phần 4):
-   - KHÔNG kết luận theo độ giống câu chữ. Mỗi mô tả được bóc thành CHỮ KÝ
-     có cấu trúc (loại vật tư / các trường / màu / xuất xứ / thông số) rồi
-     so THUỘC TÍNH-VỚI-THUỘC TÍNH.
-   - Kết quả rơi vào một trong các nhãn: Khớp Description, Khớp chứa nhau,
-     Lệch Item Name (khớp phần sau), hoặc các loại Lệch (loại vật tư /
-     thông số / màu / xuất xứ).
-   - Thứ tự từ được GIỮ NGUYÊN để phân biệt màu ('GREEN/YELLOW' khác
-     'YELLOW/GREEN') và cấu hình ('R/2+W/3' khác 'R/3+W/2'). Tuyệt đối
-     không dùng set() làm mất thứ tự khi in ra báo cáo.
+ Phần 5 : Cảnh báo chất lượng dữ liệu.
 =============================================================================
 """
 
@@ -92,7 +81,10 @@ def drop_invalid_description_new(df):
     cleaned = df['Description new'].astype(str).str.strip().str.lower()
     is_invalid_value = cleaned.isin(INVALID_DESCRIPTION_VALUES)
     has_no_letter = ~cleaned.str.contains(r'[a-zA-ZÀ-ỹ]', regex=True, na=True)
-    keep = has_value & ~(is_invalid_value | has_no_letter)
+    # Bỏ dòng có TRƯỜNG CUỐI (sau dấu phẩy cuối) là 'vr' - dòng biến thể,
+    # không cần đối chiếu.
+    ends_with_vr = cleaned.str.split(',').str[-1].str.strip().eq('vr')
+    keep = has_value & ~(is_invalid_value | has_no_letter | ends_with_vr)
     return df[keep].copy(), df[~keep].copy()
 
 
@@ -136,7 +128,7 @@ WORD_MAP = {
     'gn': 'green', 'grn': 'green',
     'blu': 'blue',
     'vt': 'violet', 'pur': 'violet', 'prp': 'violet',
-    'gy': 'grey', 'gry': 'grey', 'gray': 'grey',
+    'gy': 'grey', 'gry': 'grey', 'gray': 'grey', 'gay': 'grey',
     'wh': 'white', 'wht': 'white',
     'pk': 'pink', 'pnk': 'pink',
     'gnye': 'greenyellow', 'gnyel': 'greenyellow', 'yegn': 'greenyellow',
@@ -148,10 +140,6 @@ WORD_MAP = {
     'sq': 'sqmm', 'sqmm': 'sqmm', 'mmsq': 'sqmm', 'sqm': 'sqmm',
     'fr': 'flameretardant', 'hpvc': 'hpvc',
 }
-# ĐÃ BỎ 'vn'->vietnam: trong dữ liệu 'Vn' là điện áp danh định (voltage
-# nominal, vd '1.1Vn/CONT'), không phải Việt Nam. 'viet nam' và 'vnm' vẫn
-# được gộp về vietnam qua PHRASE_RULES / WORD_MAP.
-# 'sq' được gộp về 'sqmm' để '10.0SQ' == '10.0 SQmm'.
 
 COLOR_SET = {
     'black', 'red', 'blue', 'yellow', 'white',
@@ -164,21 +152,29 @@ ORIGIN_SET = {
     'india', 'usa', 'france', 'thailand', 'singapore',
 }
 
-# Từ "thừa" - chỉ mang tính mô tả, không phân biệt vật tư. Bỏ khi so túi từ
-# để 'GREEN COLOR / LED TYPE' == 'GREEN / LED', 'T/B' == "T/B ASS'Y".
 FILLER_WORDS = {
     'color', 'colour', 'type', 'the', 'of', 'for', 'with', 'and',
-    'w',  # 'w/' = with
-    'assembly',  # ASS'Y / ASSY / ASSEMBLY đã gộp về 'assembly' ở PHRASE_RULES
+    'w',  
+    'assembly',  
 }
 
-# Nhãn KHÔNG phải thông số đo dạng nhãn-giá trị (đơn vị tiết diện, đơn vị
-# đếm...) - bỏ khỏi extract_measures để tránh lệch giả '10sq' vs '10 sqmm'.
 MEASURE_LABEL_BLACKLIST = {
-    'sq', 'sqmm', 'sqm', 'mm', 'cm', 'pi', 'ea', 'pcs', 'set', 'cl',
+    'mm', 'cm', 'pi', 'ea', 'pcs', 'set', 'cl',
 }
 
-# SH CABLE / SH VINA CABLE và COSMOLINK (VINA) là CÙNG một NCC (đổi tên).
+MODEL_NOISE_FRAGMENTS = {
+    'ac', 'dc', 'v', 'ys',
+    'hyundai', 'hengzhu', 'china', 'korea', 'vietnam', 'japan',
+    'se', 'tse', 'vina',
+}
+
+TYPE_DISCRIMINATOR_WORDS = {
+    'bolt', 'screw', 'nut', 'washer', 'rivet', 'stud',
+    'socket', 'head', 'cap', 'countersunk', 'pan',
+    'combined', 'tapping',
+    'hex', 'hexagon', 'slotted', 'phillips',
+}
+
 SUPPLIER_ALIASES = {
     'sh cable': 'cosmolink',
     'sh vina cable': 'cosmolink',
@@ -195,10 +191,7 @@ PHRASE_RULES = [
     (re.compile(r'\bcosmolink\s+vina\b'), 'cosmolink'),
     (re.compile(r'\bviet\s+nam\b'), 'vietnam'),
     (re.compile(r'\bsouth\s+korea\b'), 'korea'),
-    # 'AUX.VOLTAGE' và 'COIL VOLTAGE' cùng nghĩa: điện áp cuộn dây rơ-le.
     (re.compile(r'\b(?:aux|coil)[\s\.\-]*voltage\b'), 'voltage'),
-    # Chuẩn hóa mọi biến thể ASS'Y / ASSY / ASSEMBLY về một token rồi coi
-    # là từ thừa (T/B == T/B ASS'Y).
     (re.compile(r"\bass(?:'?y|embly)?\b"), 'assembly'),
 ]
 
@@ -206,12 +199,12 @@ CLASS5_PATTERN = re.compile(r'\bclass\s*[-:=]?\s*5(?:\.0)?\b')
 TOKEN_PATTERN = re.compile(r'\d+\.\d+|\d+|[a-z]+')
 PARENTHETICAL_PATTERN = re.compile(r'\([^)]*\)')
 DIGIT_PATTERN = re.compile(r'\d')
-
-LABEL_BEFORE_VALUE = re.compile(r'\b([a-z]{1,3})(\d+(?:\.\d+)?)\b')
-VALUE_BEFORE_LABEL = re.compile(r'\b(\d+(?:\.\d+)?)([a-z]{1,4})\b')
+LABELED_FIELD = re.compile(r'([a-z][a-z ]{1,20}):\s*([^,()]+)')
+LABEL_BEFORE_VALUE = re.compile(r'\b([a-z]{1,3})\s?(\d+(?:\.\d+)?)\b')
+VALUE_BEFORE_LABEL = re.compile(r'\b(\d+(?:\.\d+)?)\s?([a-z]{1,4})\b')
+CHANNEL_RATIO = re.compile(r'\b([a-z])/(\d+)\b')
+RATIO_UNIT = re.compile(r'\b(\d+(?:\.\d+)?/\d+(?:\.\d+)?)([a-z]{1,3})\b')
 MODEL_CODE_PATTERN = re.compile(r'[a-z0-9]+(?:[\-/][a-z0-9]+)*')
-
-COLOR_ORDER_SENSITIVE = True
 
 
 def remove_diacritics(text):
@@ -228,11 +221,33 @@ def normalize_numbers(text):
     return text
 
 
+def normalize_voltage(text):
+    """
+    Chuẩn hóa điện áp về dạng TÁCH RỜI '<số>v <ac|dc>' để mọi cách viết
+    """
+    # số + V + (AC|DC) dính  ->  'số v ac [dc]'
+    text = re.sub(
+        r'\b(\d+(?:[./\-]\d+)*)\s*v\s*(ac|dc)(?:\s*/\s*(ac|dc))?\b',
+        lambda m: f'{m.group(1)}v {m.group(2)}'
+                  + (f' {m.group(3)}' if m.group(3) else ''),
+        text)
+    # (AC|DC) prefix + số + V  ->  'số v ac [dc]'
+    text = re.sub(
+        r'\b(ac|dc)(?:\s*/\s*(ac|dc))?[\s\-]*(\d+(?:[./\-]\d+)*)\s*v\b',
+        lambda m: f'{m.group(3)}v {m.group(1)}'
+                  + (f' {m.group(2)}' if m.group(2) else ''),
+        text)
+    return text
+
+
 def normalize_text(text):
     s = remove_diacritics(str(text).lower())
     for pattern, replacement in PHRASE_RULES:
         s = pattern.sub(replacement, s)
     s = CLASS5_PATTERN.sub(' ', s)
+    s = normalize_voltage(s)
+    # Chuẩn hóa tiết diện: '10sq', '10 sq', '10sqmm', '10 mm2' -> '10 sqmm'
+    s = re.sub(r'(\d)\s*(?:sq\s*mm|sqmm|mm\s*sq|sq|mm2)\b', r'\1 sqmm', s)
     return normalize_numbers(s)
 
 
@@ -262,6 +277,11 @@ def extract_measures(text):
         if label in MEASURE_LABEL_BLACKLIST:
             continue
         measures.setdefault(label, set()).add(value)
+    for channel, count in CHANNEL_RATIO.findall(text):
+        measures.setdefault(f'ch_{channel}', set()).add(count)
+
+    for ratio, unit in RATIO_UNIT.findall(text):
+        measures.setdefault(f'ratio_{unit}', set()).add(ratio)
     return {k: frozenset(v) for k, v in measures.items()}
 
 
@@ -276,12 +296,17 @@ class ItemSignature:
     fields: Counter = dc_field(default_factory=Counter)
     field_source: tuple = ()
     color_sequence: tuple = ()
+    color_clusters: frozenset = frozenset()
+    color_singles: frozenset = frozenset()
     origins: tuple = ()
     suppliers: frozenset = frozenset()
     measures: tuple = ()
     model_codes: frozenset = frozenset()
     word_bag: Counter = dc_field(default_factory=Counter)
     body_word_bag: Counter = dc_field(default_factory=Counter)
+    labeled_fields: tuple = ()
+    type_words: frozenset = frozenset()
+    numbers: tuple = ()
 
     @property
     def is_empty(self):
@@ -292,12 +317,19 @@ class ItemSignature:
         return dict(self.measures)
 
     @property
+    def labeled_map(self):
+        return dict(self.labeled_fields)
+
+    @property
     def source_map(self):
         return dict(self.field_source)
 
     @property
     def colors(self):
-        return frozenset(self.color_sequence)
+        result = set(self.color_sequence) | set(self.color_singles)
+        for cluster in self.color_clusters:
+            result.update(cluster)
+        return frozenset(result)
 
     @property
     def category_text(self):
@@ -337,20 +369,9 @@ def _extract_suppliers(normalized):
 
 def _collapse_color_annotation(normalized_part):
     """
-    Bỏ ngoặc chú giải MÀU trong một trường.
-
-    'b w r bk (blue white red black)' -> 'b w r bk'
-    Chỉ bỏ khi MỌI từ trong ngoặc đều là màu (kể cả dạng viết tắt map sang
-    màu). Ngoặc chứa số đo/định danh/thông tin khác được GIỮ NGUYÊN.
+    GIỮ nguyên toàn bộ nội dung trong ngoặc.
     """
-    def replace(match):
-        inner = match.group(1)
-        words = re.findall(r'[a-z]+', inner)
-        if words and all(WORD_MAP.get(w, w) in COLOR_SET for w in words):
-            return ' '
-        return match.group(0)
-
-    return re.sub(r'\(([^)]*)\)', replace, normalized_part)
+    return normalized_part
 
 
 # Cụm "sạch" để lấy màu: chỉ gồm chữ và dấu ngăn màu (/ + - & khoảng trắng),
@@ -358,14 +379,9 @@ def _collapse_color_annotation(normalized_part):
 COLOR_CLUSTER_PATTERN = re.compile(r'[a-z]+(?:[\s/&+\-][a-z]+)*')
 
 
-def _extract_colors_in_order(text):
+def _extract_color_info(text):
     """
-    Lấy màu theo đúng thứ tự xuất hiện, KHỬ TRÙNG LẶP.
-
-    Bước 1: XÓA mọi mã model (cụm chữ-số dính nhau như 'ysbsl33-dl11-gy')
-            khỏi text. Nhờ đó hậu tố màu nằm trong mã model ('-GY', '-RGY')
-            biến mất, không bị nhận nhầm là màu 'grey'.
-    Bước 2: bóc màu từ phần còn lại, giữ thứ tự.
+    Bóc màu từ cả nội dung ngoài ngoặc lẫn trong ngoặc.
     """
     cleaned = MODEL_CODE_PATTERN.sub(
         lambda mt: ' ' if (
@@ -374,13 +390,64 @@ def _extract_colors_in_order(text):
         text,
     )
 
-    colors = [
-        WORD_MAP.get(piece, piece)
-        for piece in re.findall(r'[a-z]+', cleaned)
-        if WORD_MAP.get(piece, piece) in COLOR_SET
-    ]
+    chain_abbrev = {
+        'b': 'blue', 'w': 'white', 'r': 'red', 'y': 'yellow',
+        'bk': 'black', 'blk': 'black', 'bn': 'brown', 'br': 'brown',
+        'g': 'green', 'gn': 'green', 'gy': 'grey', 'gr': 'grey',
+        'o': 'orange', 'v': 'violet',
+    }
 
-    return tuple(dict.fromkeys(colors))
+    clusters = []
+    singles = []
+    all_colors = []
+
+    for run in COLOR_CLUSTER_PATTERN.findall(cleaned):
+        has_strong_separator = bool(re.search(r'[/&+\-]', run))
+        pieces = re.split(r'[\s/&+\-]+', run)
+        if not pieces:
+            continue
+
+        # Chỉ trong chuỗi màu có dấu ngăn mới mở rộng B/W/R/Y một ký tự.
+        mapped = [
+            (chain_abbrev.get(p, WORD_MAP.get(p, p))
+             if has_strong_separator else WORD_MAP.get(p, p))
+            for p in pieces
+        ]
+        seq = [c for c in mapped if c in COLOR_SET]
+        if not seq:
+            continue
+
+        # Một chuỗi có dấu ngăn chỉ là cụm màu nếu TẤT CẢ mảnh đều nhận diện
+        # được là màu. Điều này ngăn 'MEANWELL/CHINA' thành cụm màu giả.
+        if has_strong_separator and len(pieces) >= 2:
+            if len(seq) != len(pieces):
+                # Chuỗi có một phần không phải màu (T/B, W/PVC, AC/DC...)
+                # không phải dữ kiện màu; bỏ cả run để tránh nhận nhầm B/W.
+                continue
+            cluster = tuple(dict.fromkeys(seq))
+            if len(cluster) >= 2:
+                clusters.append(cluster)
+            else:
+                singles.extend(cluster)
+            all_colors.extend(cluster)
+            continue
+
+        # Không có dấu ngăn mạnh: màu cách khoảng trắng là các màu đơn.
+        singles.extend(seq)
+        all_colors.extend(seq)
+
+    return (
+        frozenset(clusters),
+        frozenset(singles),
+        tuple(dict.fromkeys(all_colors)),
+    )
+
+
+def _canon_number(text):
+    """Chuẩn hóa số để so: '6.0'->'6', '1.50'->'1.5'."""
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return text or '0'
 
 
 def build_signature(description):
@@ -395,11 +462,7 @@ def build_signature(description):
     field_source = OrderedDict()
 
     for index, part in enumerate(normalized_parts):
-        # Chuẩn hóa mã màu viết tắt kèm chú giải trong ngoặc: khi một cụm
-        # có dạng 'B-W-R-BK(Blue-White-Red-Black)' thì phần trong ngoặc chỉ
-        # viết đầy đủ lại các màu đã có ở dạng viết tắt -> bỏ ngoặc để hai
-        # cách viết tương đương. Ngoặc KHÁC (mang thông tin mới, số đo, định
-        # danh) vẫn được GIỮ để không làm mất dữ liệu phân biệt.
+        # Giữ nội dung trong ngoặc như một phần dữ liệu cần so.
         part = _collapse_color_annotation(part)
 
         tokens = tokenize_field_color_agnostic(part)
@@ -413,33 +476,49 @@ def build_signature(description):
     if not field_token_lists:
         return ItemSignature(raw=str(description))
 
-    outside = normalize_text(PARENTHETICAL_PATTERN.sub(' ', str(description)))
+    # Màu được bóc từ TOÀN BỘ mô tả, gồm cả nội dung trong ngoặc. 
+    color_clusters, color_singles, color_sequence = _extract_color_info(
+        normalized)
+    outside = normalized
 
-    # Màu chỉ hợp lệ khi đứng như một TRƯỜNG MÀU ĐỘC LẬP (một token viết
-    # tách bằng khoảng trắng / dấu phẩy / dấu gạch chéo giữa các màu), KHÔNG
-    # phải mảnh dính trong mã model. Ví dụ 'DL11-GY': 'gy' là hậu tố model,
-    # không phải màu 'grey'. Ta bóc màu từ các cụm KHÔNG chứa chữ số và
-    # không dính liền chữ-số qua dấu gạch.
-    color_sequence = _extract_colors_in_order(outside)
     outside_tokens = tokenize_field(outside)
     origins = tuple(
         dict.fromkeys(t for t in outside_tokens if t in ORIGIN_SET))
 
-    # Túi từ toàn mô tả: gom mọi token của tất cả trường (đã color-agnostic
-    # nên màu sắp cùng nhau), bỏ từ thừa. Đây là nền so sánh CHÍNH - không
-    # phụ thuộc dấu phân cách hay cách gộp/tách trường.
+    # So sánh màu sắc, hai hay ba lần lặp lại sẽ tính là chú giải
     all_tokens = [t for field in field_token_lists for t in field]
     word_bag = Counter(t for t in all_tokens if t not in FILLER_WORDS)
 
     body_tokens = [t for field in field_token_lists[1:] for t in field]
     body_word_bag = Counter(t for t in body_tokens if t not in FILLER_WORDS)
 
-    # Loại vật tư (category) cũng bỏ từ thừa: "T/B ASS'Y" -> category ('t','b')
-    # trùng với "T/B", nên hai mã được coi CÙNG loại (khớp), không phải lệch
-    # item name.
+    # Trường có nhãn 'Nhãn: giá trị': bóc thành ràng buộc 
+    # 'Words: English and Vietnamese' KHÁC 'Words: English'.
+    labeled = {}
+    for label, value in LABELED_FIELD.findall(normalize_text(str(description))):
+        key = ' '.join(label.split())
+        value_words = frozenset(
+            w for w in re.findall(r'[a-z0-9]+', value)
+            if w not in FILLER_WORDS)
+        if value_words:
+            labeled[key] = value_words
+    labeled_fields = tuple(sorted(labeled.items()))
+
+    # "Từ định loại": trước và sau dấu phẩy đầu tiên
+    if len(field_token_lists) >= 2:
+        type_words = frozenset(
+            t for t in field_token_lists[1] if t not in FILLER_WORDS)
+    else:
+        type_words = frozenset()
+
+    # Loại vật tư (category) cũng bỏ từ thừa
     category = tuple(t for t in field_token_lists[0] if t not in FILLER_WORDS)
     if not category:
         category = tuple(field_token_lists[0])
+
+    # Bội số (multiset) TẤT CẢ con số: giữ số lần xuất hiện để phân biệt
+    numbers = tuple(sorted(
+        _canon_number(n) for n in re.findall(r'\d+(?:\.\d+)?', normalized)))
 
     return ItemSignature(
         raw=str(description),
@@ -447,6 +526,8 @@ def build_signature(description):
         fields=Counter(' '.join(t) for t in field_token_lists),
         field_source=tuple(field_source.items()),
         color_sequence=color_sequence,
+        color_clusters=color_clusters,
+        color_singles=color_singles,
         origins=origins,
         suppliers=_extract_suppliers(normalized),
         measures=tuple(sorted(extract_measures(normalized).items())),
@@ -455,6 +536,9 @@ def build_signature(description):
             if DIGIT_PATTERN.search(t) and re.search(r'[a-z]', t)),
         word_bag=word_bag,
         body_word_bag=body_word_bag,
+        labeled_fields=labeled_fields,
+        type_words=type_words,
+        numbers=numbers,
     )
 
 
@@ -487,11 +571,36 @@ def _format_fields(field_counter, *source_maps):
 
 def _compare_attributes(sig1, sig2):
     """Kiểm tra màu / xuất xứ / NCC / thông số. None nếu tương thích."""
-    if sig1.colors and sig2.colors:
-        if sig1.colors != sig2.colors:
+    # --- Màu sắc ---
+    # Chỉ khóa THỨ TỰ trong phạm vi một CỤM MÀU; màu đơn lẻ, cả cụm di chuyển tự do
+    colors1 = sig1.colors
+    colors2 = sig2.colors
+    # Chỉ so màu khi CẢ HAI bên đều lộ màu.
+    both_have_colors = bool(colors1) and bool(colors2)
+    if both_have_colors:
+        if colors1 != colors2:
             return DIFF_COLOR, f'{sig1.color_text} ↔ {sig2.color_text}'
-        if COLOR_ORDER_SENSITIVE and sig1.color_sequence != sig2.color_sequence:
-            return DIFF_COLOR_ORDER, f'{sig1.color_text} ↔ {sig2.color_text}'
+        # (b) chỉ là ràng buộc THỨ TỰ màu trước sau, không khóa vị trí trong hàng
+        def preserves_cluster_order(cluster, observed_sequence):
+            positions = {color: i for i, color in enumerate(observed_sequence)}
+            return all(
+                positions[cluster[i]] < positions[cluster[i + 1]]
+                for i in range(len(cluster) - 1)
+            )
+
+        all_constraints = sig1.color_clusters | sig2.color_clusters
+        sequence1 = sig1.color_sequence or tuple(sorted(colors1))
+        sequence2 = sig2.color_sequence or tuple(sorted(colors2))
+        invalid = [
+            cluster for cluster in all_constraints
+            if not (preserves_cluster_order(cluster, sequence1)
+                    and preserves_cluster_order(cluster, sequence2))
+        ]
+        if invalid:
+            def show(sequence):
+                return '/'.join(sequence).upper()
+            return DIFF_COLOR_ORDER, (
+                f'{show(sequence1)} ↔ {show(sequence2)}')
 
     if sig1.suppliers and sig2.suppliers and sig1.suppliers != sig2.suppliers:
         return DIFF_SUPPLIER, (
@@ -500,6 +609,15 @@ def _compare_attributes(sig1, sig2):
 
     if sig1.origins and sig2.origins and set(sig1.origins) != set(sig2.origins):
         return DIFF_ORIGIN, f'{sig1.origin_text} ↔ {sig2.origin_text}'
+
+    # Trường có nhãn 'Nhãn: giá trị'
+    lab1, lab2 = sig1.labeled_map, sig2.labeled_map
+    label_conflicts = sorted(
+        f'{key}: {" ".join(sorted(lab1[key]))} ↔ {" ".join(sorted(lab2[key]))}'
+        for key in lab1.keys() & lab2.keys()
+        if lab1[key] != lab2[key])
+    if label_conflicts:
+        return DIFF_SPEC, '; '.join(label_conflicts)
 
     map1, map2 = sig1.measure_map, sig2.measure_map
     conflicts = sorted(
@@ -510,12 +628,32 @@ def _compare_attributes(sig1, sig2):
     if conflicts:
         return DIFF_SPEC, '; '.join(conflicts)
 
-    only1 = sig1.model_codes - sig2.model_codes
-    only2 = sig2.model_codes - sig1.model_codes
-    if only1 and only2:
-        return DIFF_SPEC, f'model {sorted(only1)} ↔ {sorted(only2)}'
-
     return None
+
+
+def _drop_affix_matches(only1, only2):
+    """Loại khỏi hai tập những mảnh chữ mà một bên là tiền tố/hậu tố chuỗi
+    của một mảnh bên kia (vd 'dnc' vs 'ysdnc', 'mr' vs 'mrb')."""
+    matched1, matched2 = set(), set()
+    for a in only1:
+        for b in only2:
+            if a.isalpha() and b.isalpha() and (
+                a.endswith(b) or b.endswith(a)
+                or a.startswith(b) or b.startswith(a)
+            ):
+                matched1.add(a)
+                matched2.add(b)
+    return only1 - matched1, only2 - matched2
+
+
+def _model_fragments(model_codes):
+    """Tập mảnh chữ-số của toàn bộ model codes (bỏ mảnh 1 ký tự nhiễu)."""
+    frags = set()
+    for model in model_codes:
+        for piece in re.findall(r'[a-z]+|\d+', model):
+            if len(piece) >= 2 or piece.isdigit():
+                frags.add(piece)
+    return frags
 
 
 def _format_words(word_counter):
@@ -524,39 +662,93 @@ def _format_words(word_counter):
 
 def _measure_and_color_tokens(sig):
     """Các token đã được giải thích bởi measures/màu/xuất xứ - loại khỏi túi
-    từ khi so quan hệ cấu trúc để không báo 'thừa' oan các con số đo hay
-    tên màu (chúng đã được so riêng ở _compare_attributes).
-
-    KHÔNG loại token của model code: một cụm như '1-PORT' có thể vừa bị nhận
-    là model vừa chứa từ 'port' có nghĩa; loại nó sẽ gây lệch giả bất đối
-    xứng khi bên kia viết 'port' tách rời."""
+    từ khi so quan hệ cấu trúc. CHỈ loại GIÁ TRỊ SỐ của measure"""
     tokens = set()
     for label, values in sig.measures:
-        tokens.add(label)
         for v in values:
-            tokens.update(re.findall(r'[a-z0-9]+', v))
+            # chỉ bỏ mảnh SỐ trong giá trị; giữ mọi mảnh chữ
+            for frag in re.findall(r'[a-z0-9]+', v):
+                if frag.isdigit() or re.search(r'\d', frag):
+                    tokens.add(frag)
     tokens.update(sig.color_sequence)
     tokens.update(sig.origins)
     return tokens
 
 
+def _pair_off_variants(extra1, extra2):
+    """
+    Loại khỏi hai tập những từ là BIẾN THỂ CHUỖI của nhau:
+    """
+    matched1, matched2 = set(), set()
+    for a in sorted(extra1):
+        for b in sorted(extra2):
+            if b in matched2:
+                continue
+            long, short = (a, b) if len(a) >= len(b) else (b, a)
+            if len(short) < 2:
+                continue
+            is_variant = (
+                short in long                      # chứa chuỗi con / affix
+                or (len(a) >= 3 and len(b) >= 3
+                    and _one_edit_apart(a, b))     # lỗi gõ 1 ký tự
+            )
+            if is_variant:
+                matched1.add(a)
+                matched2.add(b)
+                break
+    return extra1 - matched1, extra2 - matched2
+
+
+def _one_edit_apart(a, b):
+    """True nếu a và b chỉ khác nhau 1 phép sửa (thêm/bớt/thay 1 ký tự)."""
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diffs = sum(1 for x, y in zip(a, b) if x != y)
+        return diffs == 1
+    # khác 1 độ dài: kiểm tra chèn/xóa 1 ký tự
+    long, short = (a, b) if len(a) > len(b) else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(long) and j < len(short):
+        if long[i] != short[j]:
+            if skipped:
+                return False
+            skipped = True
+            i += 1
+        else:
+            i += 1
+            j += 1
+    return True
+
+
+def _words_only(bag, ignore):
+    """Chỉ giữ TỪ CHỮ (bỏ token chứa số và nhãn đo 1 ký tự). Số được so
+    riêng qua tập số toàn mô tả."""
+    result = set()
+    for w in bag:
+        if w in ignore:
+            continue
+        if DIGIT_PATTERN.search(w):
+            continue
+        if len(w) == 1 and w.isalpha():
+            continue
+        result.add(w)
+    return result
+
+
 def _structural_relation_bag(bag1, bag2, ignore1, ignore2):
     """
-    So QUAN HỆ CẤU TRÚC trên TẬP TỪ (set of words), sau khi bỏ các token đã
-    được giải thích bởi thông số/màu/xuất xứ/model.
-
-    Dùng TẬP HỢP (không đếm bội) vì trong mô tả kỹ thuật, một từ lặp lại
-    (vd 'port' trong '1-PORT ... 2 port', 'comm' trong 'ethernet comm ...
-    serial comm') không có nghĩa là "nhiều hơn". Nhờ so trên tập từ, mọi
-    khác biệt về dấu phân cách và cách gộp/tách trường đều bị bỏ qua.
-
-    Trả về ('exact'|'contain'|'content', chi_tiết, side_đầy_đủ_hơn).
+    So QUAN HỆ CẤU TRÚC trên TẬP TỪ CHỮ (số được so RIÊNG ở phần thông số).
     """
-    s1 = {w for w in bag1 if w not in ignore1}
-    s2 = {w for w in bag2 if w not in ignore2}
+    s1 = _words_only(bag1, ignore1)
+    s2 = _words_only(bag2, ignore2)
 
     extra1 = s1 - s2
     extra2 = s2 - s1
+
+    # Ghép cặp các từ riêng là BIẾN THỂ CHUỖI của nhau 
+    extra1, extra2 = _pair_off_variants(extra1, extra2)
 
     if not extra1 and not extra2:
         return 'exact', '', 0
@@ -578,8 +770,36 @@ def compare_signatures(sig1, sig2):
 
     attribute_diff = _compare_attributes(sig1, sig2)
 
+    # Kiểm tra "từ định loại" (2 trường đầu): nếu MỖI bên có từ định loại
+    # riêng mà không bên nào là tập con -> khác LOẠI CHI TIẾT.
+    type_diff = None
+    tw1, tw2 = sig1.type_words, sig2.type_words
+    if tw1 and tw2 and tw1 != tw2:
+        only_t1 = {w for w in tw1 - tw2 if not DIGIT_PATTERN.search(w)}
+        only_t2 = {w for w in tw2 - tw1 if not DIGIT_PATTERN.search(w)}
+        # Chỉ coi là KHÁC LOẠI khi phần khác biệt của F2 chứa DANH TỪ ĐỊNH LOẠI.
+        disc1 = only_t1 & TYPE_DISCRIMINATOR_WORDS
+        disc2 = only_t2 & TYPE_DISCRIMINATOR_WORDS
+        if disc1 or disc2:
+            left = ' '.join(sorted(only_t1)) or '(không)'
+            right = ' '.join(sorted(only_t2)) or '(không)'
+            type_diff = f'{left} ↔ {right}'
+
     ignore1 = _measure_and_color_tokens(sig1)
     ignore2 = _measure_and_color_tokens(sig2)
+
+    # So THÔNG SỐ theo BỘI SỐ (multiset) các con số (nguyên tắc hai đầu):
+    #   - Mỗi bên có số RIÊNG (cả hai chiều khác rỗng) -> LỆCH THÔNG SỐ.
+    #   - Chỉ một bên thừa số -> góp vào quan hệ "chứa nhau".
+    num1, num2 = Counter(sig1.numbers), Counter(sig2.numbers)
+    num_only1 = sorted((num1 - num2).elements())
+    num_only2 = sorted((num2 - num1).elements())
+    number_diff = bool(num_only1) and bool(num_only2)
+    number_extra = None
+    if num_only1 and not num_only2:
+        number_extra = 1
+    elif num_only2 and not num_only1:
+        number_extra = 2
 
     rel_all, detail_all, fuller_all = _structural_relation_bag(
         sig1.word_bag, sig2.word_bag, ignore1, ignore2)
@@ -594,7 +814,22 @@ def compare_signatures(sig1, sig2):
         if attribute_diff is not None:
             label, detail = attribute_diff
             return result(label, detail)
+        # Khác loại chi tiết (2 trường đầu mỗi bên có từ riêng) -> lệch loại.
+        if type_diff is not None:
+            return result(DIFF_CATEGORY, f'Khác loại chi tiết: {type_diff}')
+        # Mỗi bên có số RIÊNG -> lệch thông số .
+        if number_diff:
+            return result(
+                DIFF_SPEC,
+                f'số {num_only1} ↔ {num_only2}')
         if rel_all == 'exact':
+            # Từ chữ khớp hết; nếu một bên thừa số -> chứa nhau, không thì khớp.
+            if number_extra:
+                extra = num_only1 if number_extra == 1 else num_only2
+                return result(
+                    MATCH_CONTAIN,
+                    f'Mã {number_extra} có thêm số {extra}',
+                    missing=' '.join(extra), fuller=str(number_extra))
             return result(MATCH_EXACT, 'Mọi trường khớp sau chuẩn hóa')
         if rel_all == 'contain':
             return result(
@@ -605,7 +840,15 @@ def compare_signatures(sig1, sig2):
         return result(DIFF_CONTENT, detail_all)
 
     # --- B. KHÁC loại vật tư ---
-    if attribute_diff is None and rel_body in ('exact', 'contain'):
+    # Nếu item name của hai bên đều là DANH TỪ ĐỊNH LOẠI (bolt/nut/screw...)
+    # thì đây là hai sản phẩm KHÁC HẲN.
+    cat1_disc = set(sig1.category) & TYPE_DISCRIMINATOR_WORDS
+    cat2_disc = set(sig2.category) & TYPE_DISCRIMINATOR_WORDS
+    both_are_types = bool(cat1_disc) and bool(cat2_disc) and (
+        set(sig1.category) != set(sig2.category))
+
+    if (not both_are_types and not number_diff and attribute_diff is None
+            and rel_body in ('exact', 'contain')):
         note = 'khớp Description' if rel_body == 'exact' else 'khớp chứa nhau'
         return result(
             MATCH_ITEMNAME,
@@ -664,9 +907,26 @@ def classify_cause(label):
     return 'Lệch nội dung (cần rà soát)'
 
 
+VR_SUFFIX = re.compile(r'\bvr\b\s*$', re.IGNORECASE)
+
+
+def _has_vr_suffix(description):
+    """Mô tả có đuôi 'VR' (biến thể/variant) - bỏ qua khi báo lệch loại vật tư."""
+    return bool(VR_SUFFIX.search(str(description).strip()))
+
+
 def classify_row(desc_a, desc_target):
     res = compare_signatures(build_signature(desc_a), build_signature(desc_target))
-    return res['label'], res['detail'], classify_cause(res['label'])
+    label = res['label']
+
+    # Lệch loại vật tư: kiểm tra kỹ. Nếu một trong hai mô tả có đuôi 'VR'(dòng biến thể), KHÔNG báo lệch loại 
+    if label == DIFF_CATEGORY and (
+            _has_vr_suffix(desc_a) or _has_vr_suffix(desc_target)):
+        return (DIFF_CONTENT,
+                res['detail'] + ' [bỏ qua lệch loại: dòng đuôi VR]',
+                'Lệch nội dung (cần rà soát)')
+
+    return label, res['detail'], classify_cause(label)
 
 
 def _rest_after_first_comma(description):
@@ -681,7 +941,7 @@ def classify_code_a_vs_ksys(desc_a, desc_ksys):
 
     Theo thiết kế, Description Ksys = Description Code A đã BỎ item name (phần
     trước dấu phẩy đầu tiên). Vì vậy ta so PHẦN SAU dấu phẩy đầu của Code A
-    với TOÀN BỘ Ksys:
+    với TOÀ  BỘ Ksys:
       - Nếu khớp / khớp chứa nhau  -> 'Khớp' (đúng thiết kế).
       - Nếu phần sau đó KHÔNG khớp Ksys -> mới coi là lệch, và nêu rõ nguyên
         nhân (item name, thông số, màu, ...).
@@ -758,8 +1018,10 @@ def aggregate_by_new_item(new_item_table):
         aggregated['signature'].map(lambda s: not s.is_empty)
     ].reset_index(drop=True)
 
-    aggregated['Loại vật tư'] = aggregated['signature'].map(lambda s: s.category_text)
-    aggregated['Thông số kỹ thuật'] = aggregated['signature'].map(lambda s: s.technical_text)
+    aggregated['Loại vật tư'] = aggregated['signature'].map(
+        lambda s: s.category_text)
+    aggregated['Thông số kỹ thuật'] = aggregated['signature'].map(
+        lambda s: s.technical_text)
     aggregated['Màu sắc'] = aggregated['signature'].map(lambda s: s.color_text)
     aggregated['Xuất xứ'] = aggregated['signature'].map(lambda s: s.origin_text)
     return aggregated
@@ -778,7 +1040,7 @@ def block_keys(signature):
     Khóa gồm:
       - mỗi cặp thông số nhãn-giá trị (vd 'm=5', 'l=30')
       - mỗi mã model (vd 'ht-05', 'yspl3')
-      - nếu không có cả hai: loại vật tư + màu (cho nhóm chỉ khác ghi chú)
+      - nếu không có cả hai: loại vật tư + màu
     """
     keys = set()
 
@@ -962,10 +1224,6 @@ MULTI_CODE_A_SUMMARY_COLUMNS = [
     'item new', 'Số lượng Item Code A', 'Danh sách Item Code A',
     'Danh sách Description New', 'Danh sách Item Ksys']
 
-CODE_A_VERDICT_COLUMNS = [
-    'item new', 'Description new', 'item code A 1', 'Description code A 1',
-    'item code A 2', 'Description code A 2', 'Kết luận', 'Chi tiết']
-
 
 def find_items_with_multiple_code_a(new_item_table):
     relation = new_item_table[new_item_table['item code A'].ne('')]
@@ -985,42 +1243,172 @@ def find_items_with_multiple_code_a(new_item_table):
         return pd.DataFrame(columns=MULTI_CODE_A_SUMMARY_COLUMNS), df_detail
 
     df_summary = (df_detail.groupby('item new', as_index=False)
-                  .agg(**{'Số lượng Item Code A': ('item code A', 'nunique'),
-                          'Danh sách Item Code A': ('item code A', join_unique_values),
-                          'Danh sách Description New': ('Description new', join_unique_values),
-                          'Danh sách Item Ksys': ('item ksys', join_unique_values)})
+                  .agg(**{
+                      'Số lượng Item Code A': ('item code A', 'nunique'),
+                      'Danh sách Item Code A': (
+                          'item code A', join_unique_values),
+                      'Danh sách Description New': (
+                          'Description new', join_unique_values),
+                      'Danh sách Item Ksys': ('item ksys', join_unique_values)})
                   .sort_values(['Số lượng Item Code A', 'item new'],
                                ascending=[False, True])
                   .reset_index(drop=True))
     return df_summary, df_detail
 
 
-def check_one_new_many_desc(df_multi_code_a_detail):
-    records = []
-    for item_new, block in df_multi_code_a_detail.groupby('item new'):
-        rows = (block.drop_duplicates(subset=['item code A'], keep='first')
-                .to_dict('records'))
-        for i in range(len(rows)):
-            for j in range(i + 1, len(rows)):
-                first, second = sorted((rows[i], rows[j]),
-                                       key=lambda r: r['item code A'])
-                res = compare_signatures(
-                    build_signature(first['Description code A']),
-                    build_signature(second['Description code A']))
-                is_ok = res['label'] in MATCH_LABELS
-                records.append({
-                    'item new': item_new,
-                    'Description new': first['Description new'],
-                    'item code A 1': first['item code A'],
-                    'Description code A 1': first['Description code A'],
-                    'item code A 2': second['item code A'],
-                    'Description code A 2': second['Description code A'],
-                    'Kết luận': (f'Gộp hợp lý ({res["label"]})' if is_ok
-                                 else f'LỖI ÁNH XẠ - {res["label"]}'),
-                    'Chi tiết': res['detail']})
+# =============================================================================
+# KIỂM TRA QUAN HỆ 1–1: ITEM NEW <-> DESCRIPTION NEW
+# =============================================================================
 
-    return (pd.DataFrame(records, columns=CODE_A_VERDICT_COLUMNS)
-            .sort_values(['Kết luận', 'item new', 'item code A 1'])
+DUPLICATE_DESCRIPTION_COLUMNS = [
+    'Nhóm Description New', 'Description New (khóa tra cứu)',
+    'Phân loại khớp', 'Số lượng Item New',
+    'Danh sách Item New trùng', 'Description New khớp/chứa'
+]
+
+
+def build_itemnew_duplicate_description_report(pairs):
+    """
+    Sheet 'Item New trùng Description'.
+
+    KHÓA NHÓM là Description New
+    - Một Description New (hoặc một nhóm Description New khớp/chứa nhau)
+      được dùng bởi từ hai Item New trở lên là lỗi 1 Description -> nhiều Item.
+    - Chỉ lưu các nhóm có ít nhất hai Item New KHÁC NHAU..
+ Với case 'khớp chứa', hai Description raw không giống hệt nhau. Khi đó
+    chọn mô tả ngắn/gọn nhất làm 'khóa tra cứu' và vẫn liệt kê đầy đủ tất cả
+    Description New trong cùng nhóm để người dùng truy vết.
+    """
+    if not pairs:
+        return pd.DataFrame(columns=DUPLICATE_DESCRIPTION_COLUMNS)
+
+    # Node là raw Description New. Union các description được kết luận khớp.
+    uf = UnionFind()
+    desc_to_items = {}
+    desc_to_labels = {}
+
+    for pair in pairs:
+        d1 = str(pair['first']['Description new']).strip()
+        d2 = str(pair['second']['Description new']).strip()
+        i1 = str(pair['first']['item new']).strip()
+        i2 = str(pair['second']['item new']).strip()
+        if not d1 or not d2 or not i1 or not i2:
+            continue
+        uf.union(d1, d2)
+        desc_to_items.setdefault(d1, set()).add(i1)
+        desc_to_items.setdefault(d2, set()).add(i2)
+        desc_to_labels.setdefault((d1, d2), set()).add(pair['label'])
+        desc_to_labels.setdefault((d2, d1), set()).add(pair['label'])
+
+    records = []
+    groups = uf.groups()
+    # Chỉ các node thật sự nằm trong cặp khớp mới có mặt trong `groups`.
+    ordered_groups = sorted(
+        (sorted(members) for members in groups.values()),
+        key=lambda members: (min(len(d) for d in members), min(members)))
+
+    group_no = 0
+    for descriptions in ordered_groups:
+        item_news = set()
+        labels = set()
+        for description in descriptions:
+            item_news.update(desc_to_items.get(description, set()))
+            for other in descriptions:
+                if description != other:
+                    labels.update(desc_to_labels.get((description, other), set()))
+
+        # Đây là sheet kiểm tra 1 Description -> nhiều Item New.
+        if len(item_news) < 2:
+            continue
+
+        group_no += 1
+        lookup_key = min(descriptions, key=lambda d: (len(d), d))
+        records.append({
+            'Nhóm Description New': group_no,
+            'Description New (khóa tra cứu)': lookup_key,
+            'Phân loại khớp': ' | '.join(sorted(labels)),
+            'Số lượng Item New': len(item_news),
+            'Danh sách Item New trùng': ' | '.join(sorted(item_news)),
+            'Description New khớp/chứa': ' | '.join(sorted(descriptions)),
+        })
+
+    return (pd.DataFrame(records, columns=DUPLICATE_DESCRIPTION_COLUMNS)
+            .sort_values(['Nhóm Description New',
+                          'Description New (khóa tra cứu)'])
+            .reset_index(drop=True))
+
+
+ONE_NEW_MANY_DESC_COLUMNS = [
+    'item new (khóa tra cứu)', 'Số lượng Description New',
+    'Danh sách Description New', 'Kết quả kiểm tra nội dung',
+    'Cặp Description xung đột', 'Chi tiết'
+]
+
+
+def check_one_new_many_desc(new_item_table):
+    """
+    Sheet 'Lỗi 1 item new nhiều desc'.
+
+    KHÓA NHÓM là Item New:
+    - Truy vấn tất cả Description New gán cho đúng một Item New.
+    - Chỉ đưa vào sheet khi có từ hai Description New raw khác nhau.
+    - So sánh các Description New trong từng Item New để xác định có xung
+      đột nội dung thực sự hay chỉ khác cách viết/khớp chứa..
+    """
+    records = []
+    table = (new_item_table[['item new', 'Description new']]
+             .drop_duplicates()
+             .copy())
+
+    for item_new, block in table.groupby('item new', sort=True):
+        descs = sorted({
+            str(d).strip() for d in block['Description new'].tolist()
+            if str(d).strip()
+        })
+        if len(descs) < 2:
+            continue
+
+        conflicts = []
+        matched_pairs = 0
+        details = []
+        for i in range(len(descs)):
+            for j in range(i + 1, len(descs)):
+                d1, d2 = descs[i], descs[j]
+                res = compare_signatures(build_signature(d1), build_signature(d2))
+                pair_name = f'[{d1}] ↔ [{d2}]'
+                if res['label'] in MATCH_LABELS:
+                    matched_pairs += 1
+                else:
+                    conflicts.append(pair_name)
+                    details.append(
+                        f'{pair_name}: {res["label"]}'
+                        + (f' ({res["detail"]})' if res['detail'] else ''))
+
+        if conflicts:
+            outcome = 'LỖI - Xung đột nội dung Description New'
+            conflict_text = ' | '.join(conflicts)
+            detail_text = ' | '.join(details)
+        else:
+            # Raw Description khác nhau vẫn phải được ghi nhận để kiểm tra
+            # quy tắc 1 Item New chỉ có một Description New.
+            outcome = ('Cảnh báo - Nhiều Description New nhưng '
+                       'nội dung khớp/khớp chứa')
+            conflict_text = ''
+            detail_text = (f'{matched_pairs} cặp Description New đều khớp '
+                           'hoặc khớp chứa.')
+
+        records.append({
+            'item new (khóa tra cứu)': str(item_new),
+            'Số lượng Description New': len(descs),
+            'Danh sách Description New': ' | '.join(descs),
+            'Kết quả kiểm tra nội dung': outcome,
+            'Cặp Description xung đột': conflict_text,
+            'Chi tiết': detail_text,
+        })
+
+    return (pd.DataFrame(records, columns=ONE_NEW_MANY_DESC_COLUMNS)
+            .sort_values(['Kết quả kiểm tra nội dung',
+                          'item new (khóa tra cứu)'])
             .reset_index(drop=True))
 
 
@@ -1076,28 +1464,20 @@ def find_repeated_item_name(new_item_table):
 # =============================================================================
 
 def build_data_quality_report(df_full, df_dropped, new_item_table,
-                              df_groups=None, near_misses=None):
+                              df_groups=None, df_pairs=None):
     records = []
 
     def add(loai, ma, mo_ta):
         records.append({'Loại cảnh báo': loai, 'Mã': ma, 'Chi tiết': mo_ta})
 
-    for _, row in df_dropped.iterrows():
-        add('Thiếu Description New (không kiểm tra được)',
-            str(row['item code A']),
-            f"Code A: {row['Description code A']} | item new: {row['item new']}")
-
-    placeholder = df_full[df_full['item new'].apply(is_placeholder_code)]
-    for _, row in placeholder.iterrows():
-        add('Item New là mã placeholder / N/A', str(row['item code A']),
-            f"item new = '{row['item new']}' | {row['Description code A']}")
-
+    # Item New có nhiều Description New khác nhau (nghi 1 mã gán nhiều nghĩa).
     desc_count = new_item_table.groupby('item new')['Description new'].nunique()
     for item_new in desc_count[desc_count > 1].index:
         add('Item New có nhiều Description New khác nhau', item_new,
             join_unique_values(new_item_table.loc[
                 new_item_table['item new'] == item_new, 'Description new']))
 
+    # Một Item Code A ánh xạ nhiều Item New (nghi tách mã sai).
     code_a_map = (new_item_table[new_item_table['item code A'].ne('')]
                   .groupby('item code A')['item new'].nunique())
     for code_a in code_a_map[code_a_map > 1].index:
@@ -1105,25 +1485,19 @@ def build_data_quality_report(df_full, df_dropped, new_item_table,
             join_unique_values(new_item_table.loc[
                 new_item_table['item code A'] == code_a, 'item new']))
 
-    ksys_map = (new_item_table[new_item_table['item ksys'].ne('')]
-                .groupby('item new')['item ksys'].nunique())
-    for item_new in ksys_map[ksys_map > 1].index:
-        add('Item New ứng với nhiều Item Ksys', item_new,
-            join_unique_values(new_item_table.loc[
-                new_item_table['item new'] == item_new, 'item ksys']))
-
-    if df_groups is not None and not df_groups.empty:
-        for gid, blk in df_groups.groupby('Nhóm trùng số'):
-            if blk['UOM new'].nunique() > 1:
-                add('Nhóm nghi trùng nhưng lệch UOM', f'Nhóm {gid}',
-                    ' | '.join(f"{r['item new']}={r['UOM new']}"
-                               for _, r in blk.iterrows()))
-
-    for item in (near_misses or []):
-        add('Loại sát nút - chỉ chênh thứ tự màu',
-            f"{item['first']['item new']} vs {item['second']['item new']}",
-            f"{item['detail']} || {item['first']['Description new']} || "
-            f"{item['second']['Description new']}")
+    # Nhóm các Item New KHỚP DESCRIPTION với nhau nhưng lệch UOM. Chỉ xét các
+    # cặp đã được kết luận khớp (df_pairs), không phải mọi thành viên nhóm.
+    if df_pairs is not None and not df_pairs.empty and df_groups is not None:
+        uom_of = dict(zip(df_groups['item new'], df_groups['UOM new']))
+        seen = set()
+        for _, pair in df_pairs.iterrows():
+            i1, i2 = pair['item new 1'], pair['item new 2']
+            u1, u2 = uom_of.get(i1, ''), uom_of.get(i2, '')
+            key = tuple(sorted((i1, i2)))
+            if u1 and u2 and u1 != u2 and key not in seen:
+                seen.add(key)
+                add('Item New khớp Description nhưng lệch UOM',
+                    f'{i1} vs {i2}', f'{i1}={u1} | {i2}={u2}')
 
     return pd.DataFrame(records, columns=['Loại cảnh báo', 'Mã', 'Chi tiết'])
 
@@ -1171,12 +1545,18 @@ def main():
 
     df_multi_code_a_summary, df_multi_code_a_detail = (
         find_items_with_multiple_code_a(new_item_table))
-    df_one_new_many_desc = check_one_new_many_desc(df_multi_code_a_detail)
+
+    # Hai kiểm tra 1–1 độc lập, chỉ dựa trên Item New và Description New:
+    # (1) Description New làm khóa -> tìm nhiều Item New dùng chung/khớp chứa.
+    # (2) Item New làm khóa -> kiểm tra các Description New gán cho mã đó.
+    df_itemnew_duplicate_desc = build_itemnew_duplicate_description_report(pairs)
+    df_one_new_many_desc = check_one_new_many_desc(new_item_table)
+
     df_repeated_name = find_repeated_item_name(new_item_table)
 
     df_data_quality = build_data_quality_report(
         df_full, df_dropped, new_item_table,
-        df_groups=df_dup_groups, near_misses=near_misses)
+        df_groups=df_dup_groups, df_pairs=df_dup_pairs)
 
     sheets = {
         'Lệch Desc (Code A vs New)': df_desc_diff_new,
@@ -1184,8 +1564,7 @@ def main():
         'Lệch UOM (Code A vs Ksys)': df_uom_diff_ksys,
         'Lệch UOM (Code A vs New)': df_uom_diff_new,
         'Toàn bộ Data Checked': df,
-        'Item New trùng Description': df_dup_groups,
-        'Chi tiết Item New trùng': df_dup_pairs,
+        'Item New trùng Description': df_itemnew_duplicate_desc,
         'Item New nhiều Code A': df_multi_code_a_summary,
         'Lỗi 1 item new nhiều desc': df_one_new_many_desc,
         'Item bị lặp Item Name': df_repeated_name,
@@ -1205,9 +1584,9 @@ def main():
     print("      Phân bố nhóm nguyên nhân:")
     for cause, cnt in df['Nhóm nguyên nhân (Code A vs New)'].value_counts().items():
         print(f"        - {cause}: {cnt}")
-    print(f"    + [4A] Item New nghi trùng: "
-          f"{df_dup_groups['Nhóm trùng số'].nunique()} nhóm / "
-          f"{df_dup_groups['item new'].nunique()} mã / {len(df_dup_pairs)} cặp")
+    print(f"    + [4A] Description New trùng/khớp chứa dùng bởi nhiều Item New: "
+          f"{len(df_itemnew_duplicate_desc)} nhóm / "
+          f"{len(df_dup_pairs)} cặp đối chiếu")
     if not df_dup_pairs.empty:
         for label, cnt in df_dup_pairs['Phân loại'].value_counts().items():
             print(f"        - {label}: {cnt} cặp")
