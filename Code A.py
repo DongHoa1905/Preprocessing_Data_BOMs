@@ -23,7 +23,7 @@ import pandas as pd
 # 0. CẤU HÌNH CHUNG
 # =============================================================================
 
-INPUT_FILE = 'Code A check.xlsx'
+INPUT_FILE = 'CODE A check _Ms Hoa new 3.xlsx'
 OUTPUT_FILE = 'Check uom & description.xlsx'
 
 COLUMN_RENAME_MAP = {
@@ -120,18 +120,17 @@ def compare_uom(df):
 
 WORD_MAP = {
     # Màu sắc (IEC 60757 & biến thể)
-    'bk': 'black', 'blk': 'black', 'bla': 'black',
-    'bn': 'brown', 'brn': 'brown',
-    'rd': 'red',
+    'bk': 'black', 'bl': 'black',
+    'br': 'brown',
+    'r': 'red',
     'og': 'orange', 'org': 'orange', 'orn': 'orange',
-    'ye': 'yellow', 'yel': 'yellow', 'yl': 'yellow',
-    'gn': 'green', 'grn': 'green',
-    'blu': 'blue',
-    'vt': 'violet', 'pur': 'violet', 'prp': 'violet',
-    'gy': 'grey', 'gry': 'grey', 'gray': 'grey', 'gay': 'grey',
-    'wh': 'white', 'wht': 'white',
+    'ye': 'yellow', 'y': 'yellow', 'yl': 'yellow',
+    'gn': 'green', 
+    'b': 'blue',
+    'vio': 'violet', 'pur': 'violet',
+    'gray': 'grey', 'gr': 'grey',
+    'w': 'white',
     'pk': 'pink', 'pnk': 'pink',
-    'gnye': 'greenyellow', 'gnyel': 'greenyellow', 'yegn': 'greenyellow',
     # Xuất xứ
     'vnm': 'vietnam', 'cn': 'china', 'chn': 'china',
     'kr': 'korea', 'kor': 'korea', 'jp': 'japan', 'jpn': 'japan',
