@@ -46,6 +46,33 @@ Preprocessing_Data_BOMs/
 ├── Check uom & description.xlsx      # Output report
 └── README.md
 ```
+# Architecture
+
+```mermaid
+flowchart LR
+    Input[Input Excel File<br/>CODE A check _Ms Hoa new 5.xlsx]
+    Script[Code A.py<br/>Main Processing Script]
+
+    Load[Load and Clean Data]
+    UOM[UOM Comparison]
+    Match[Description Matching Engine]
+    Duplicate[New Code Duplicate Checks]
+    Quality[Data Quality Warnings]
+
+    Output[Output Excel Report<br/>Check uom & description.xlsx]
+
+    Input --> Script
+    Script --> Load
+    Load --> UOM
+    Load --> Match
+    Load --> Duplicate
+    Load --> Quality
+
+    UOM --> Output
+    Match --> Output
+    Duplicate --> Output
+    Quality --> Output
+```
 # Requirements
 Windows
 Python 3.8 or later
